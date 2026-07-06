@@ -82,6 +82,9 @@ class _Stub:
     def filled_extent(self, axis):
         return 2
 
+    def is_extent_exact(self):
+        return True
+
 
 def test_fov_source_protocol_accepts_conforming_object():
     assert isinstance(_Stub(), FovSource)

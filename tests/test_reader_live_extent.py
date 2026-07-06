@@ -133,3 +133,29 @@ def test_sharded_store_degrades_to_declared_and_inexact(tmp_path):
     assert s.is_extent_exact() is False
     # cannot probe per-frame presence under sharding → report the declared size
     assert s.filled_extent("acq_t") == s.shape[0] == 3
+
+
+# ---- regression: a stray non-dir entry in `c/` must not inflate the count ----
+
+def test_chunk_count_ignores_non_dir_entries(tmp_path):
+    """A `.DS_Store` / Dropbox conflict file beside the real `c/{frame}` chunk dirs
+    must not over-count the frame frontier.
+
+    This repo lives in Dropbox on macOS, so such stray files land under `c/`.
+    `_count_dim0_chunks` counts only directories; without that filter
+    `filled_extent("frame")` reports one blank fill_value frame too many (+1).
+    """
+    root = generate_experiment(
+        tmp_path / "exp", wells=["A1"], fovs_per_well=1, nt=1,
+        recording_frames=5, recording_planes=1,
+        zstack_channels=[("DAPI", "#4a9eff")], zstack_nz=3, rich=False)
+    store = root / "recording" / "t0" / "A1" / "fov_0.ome.zarr"
+    # force the chunk-count path: drop `captured_frames` so filled_extent counts `c/` dirs
+    zj = store / "zarr.json"
+    meta = json.loads(zj.read_text())
+    meta["attributes"]["_squid"].pop("captured_frames", None)
+    zj.write_text(json.dumps(meta))
+    # 5 written frames → chunk dirs c/0..c/4; a real macOS/Dropbox artifact lands beside them
+    (store / "c" / ".DS_Store").write_text("")
+    s = build_recording_source(root, well="A1", fov=0, context=default_context())
+    assert s.filled_extent("frame") == 5    # non-dir .DS_Store ignored (was 6 before the fix)

@@ -49,14 +49,17 @@ def _is_sharded(array_node_dir: Path, squid: dict) -> bool:
 
 
 def _count_dim0_chunks(array_node_dir: Path) -> int:
-    """Present chunk indices along dim 0 = entries under `c/`, in one scandir pass.
+    """Present chunk indices along dim 0 = chunk *dirs* under `c/`, in one scandir pass.
 
     Valid when dims 1.. are single-chunk (recording frame stores): each `c/{i}` dir
     is one written frame. Missing `c/` (nothing written yet) → 0.
     """
     try:
         with os.scandir(array_node_dir / "c") as it:
-            return sum(1 for _ in it)
+            # Count only chunk dirs (`c/{frame}/...`), like `_complete_dim0_chunks`, so a
+            # stray non-dir entry (.DS_Store / Dropbox conflict file) can't over-count. This
+            # equals the frame frontier only because squid writes frames sequentially (no gaps).
+            return sum(1 for e in it if e.is_dir())
     except FileNotFoundError:
         return 0
 

@@ -42,3 +42,11 @@ class FovSource(Protocol):
     def filled_extent(self, axis: str) -> int:
         """Count of leading indices along `axis` that hold real (non-fill) data."""
         ...
+
+    def is_extent_exact(self) -> bool:
+        """Whether `filled_extent` reflects true on-disk presence (else the declared size).
+
+        Paired with `filled_extent`: True for FAST chunk-per-file stores, False under
+        sharding (one shard hides per-frame presence, so the declared extent is returned).
+        """
+        ...
