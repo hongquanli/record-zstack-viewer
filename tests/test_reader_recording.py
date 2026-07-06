@@ -15,6 +15,7 @@ import tensorstore as ts
 from record_zstack_viewer.cache.memory import default_context, open_array
 from record_zstack_viewer.reader.fov_source import FovSource
 from record_zstack_viewer.reader.metadata import FovMetadata
+from tests.fixtures.generate import generate_experiment
 
 _DEFAULT_LIMIT = 192 * 1024 * 1024
 
@@ -120,3 +121,54 @@ def test_recording_dtype_is_numpy_not_tensorstore(tiny_experiment):
     s = build_recording_source(tiny_experiment, well="A1", fov=0, context=default_context())
     # FovSource protocol + downstream expect a numpy dtype, not ts.dtype
     assert isinstance(s.dtype, np.dtype) and s.dtype == np.uint16
+
+
+# ---- Task 1.6: FormatAdapter — open_fov -------------------------------------
+
+def test_open_fov_returns_both_phase_sources(tiny_experiment):
+    # A FOV acquired in both phases → open_fov yields a working recording AND
+    # z-stack source, each on its own uniform FovSource surface.
+    from record_zstack_viewer.reader.adapter import open_fov
+    ds = open_fov(tiny_experiment, well="A1", fov=0, context=default_context())
+    assert isinstance(ds.recording, FovSource) and isinstance(ds.zstack, FovSource)
+    assert ds.recording.dims == ("acq_t", "frame", "z", "y", "x")
+    assert ds.zstack.dims == ("acq_t", "c", "z", "y", "x")
+    # each source actually reads its visible plane (per-plane, never whole-array)
+    assert ds.recording.read_plane({"acq_t": 0, "frame": 0, "z": 0}).shape == (64, 64)
+    assert ds.zstack.read_plane({"acq_t": 0, "c": 0, "z": 0}).shape == (64, 64)
+
+
+def test_open_fov_recording_only(tmp_path):
+    # Recording-only FOV (z-stack tree removed): recording is a working source,
+    # zstack is None.
+    import shutil
+    from record_zstack_viewer.reader.adapter import open_fov
+    root = generate_experiment(tmp_path / "rec_only", wells=["A1"], fovs_per_well=1, nt=1,
+        recording_frames=4, recording_planes=2,
+        zstack_channels=[("DAPI", "#4a9eff")], zstack_nz=3, rich=False)
+    shutil.rmtree(root / "zarr")  # drop the z-stack phase entirely
+    ds = open_fov(root, well="A1", fov=0, context=default_context())
+    assert isinstance(ds.recording, FovSource)
+    assert ds.zstack is None
+    assert ds.recording.read_plane({"acq_t": 0, "frame": 0, "z": 0}).shape == (64, 64)
+
+
+def test_open_fov_zstack_only(tmp_path):
+    # Z-stack-only FOV (recording_planes=0 → no recording stores): zstack is a
+    # working source, recording is None.
+    from record_zstack_viewer.reader.adapter import open_fov
+    root = generate_experiment(tmp_path / "zs_only", wells=["A1"], fovs_per_well=1, nt=1,
+        recording_frames=4, recording_planes=0,
+        zstack_channels=[("DAPI", "#4a9eff")], zstack_nz=3, rich=False)
+    ds = open_fov(root, well="A1", fov=0, context=default_context())
+    assert ds.recording is None
+    assert isinstance(ds.zstack, FovSource)
+    assert ds.zstack.read_plane({"acq_t": 0, "c": 0, "z": 0}).shape == (64, 64)
+
+
+def test_registry_seam_registers_and_detects_zarr_v3(tiny_experiment):
+    # The seam is real: a Zarr-v3 adapter is registered by format and `detect`
+    # recognizes the experiment layout (legacy adapters plug in the same way).
+    from record_zstack_viewer.reader.adapter import ZarrV3Adapter, detect_adapter
+    adapter = detect_adapter(tiny_experiment)
+    assert isinstance(adapter, ZarrV3Adapter) and adapter.format == "ZARR_V3"
