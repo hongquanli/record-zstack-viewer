@@ -19,15 +19,33 @@ has a fallback for each. `format_version` gates changes.
     acquisition_complete(bool), aborted?(bool), captured_frames?, expected_frames?}.
     Multi-plane recording stores add {plane_index, plane_z_offset_um, n_planes};
     absence ⇒ single plane (n_planes=1, plane_index=0).
+  - `ome.multiscales[0].datasets[0].coordinateTransformations`: a `scale`
+    `{type:scale, scale:[t_s, 1, z_step_um, px_um, px_um]}` (dataset path `.` for
+    recording / `0` for z-stack). A per-FOV `translation` is appended — see Placement.
 - `acquisition.yaml` (at run START): `wellplate_scan.regions[]{name,center_mm,shape}`,
   `scan_size_mm`, `overlap_percent`, `xy_mode`.
 - `acquisition_channels.yaml` (at run START): objective, channels (names+colors).
 - `.done` (empty, at run END; also on abort).
 
 ## Additive v1.0 (optional; fallbacks noted)
-### coordinates.csv  (fallback: reconstruct from acquisition.yaml + geometry)
-Experiment root. Columns: `region, fov, z_level, x (mm), y (mm), z (um)` (+ `time`
-for time-lapse). One row per FOV. Mirrors classic multipoint.
+### Per-FOV placement — `coordinateTransformations.translation` (authoritative) + `coordinates.csv` (derived)
+**Primary — OME metadata.** Append a `translation` after the `scale` in each store's
+`multiscales[0].datasets[0].coordinateTransformations`, placing the FOV in global stage space:
+```
+"coordinateTransformations": [
+  {"type":"scale",       "scale":       [t_s, 1.0, z_step_um, px_um, px_um]},
+  {"type":"translation", "translation": [0.0, 0.0, z_stage_um, y_stage_um, x_stage_um]}
+]
+```
+- Values in µm (axis unit); convert stage mm → µm (×1000). Z translation = per-FOV **stage reference Z**.
+- A FOV's recording, z-stack, and every `fov_{k}_z{j}` plane store share the **same XY**; each plane's
+  Z translation is its absolute stage Z (`z_ref + bottom + j·dz`).
+- Standard OME-NGFF 0.4/0.5 (`scale`, then optional `translation` listed after it); read by generic
+  NGFF viewers. *Fallback when absent (old data): reconstruct the grid from `acquisition.yaml` geometry.*
+
+**Derived export — `coordinates.csv`** (experiment root): columns `region, fov, z_level, x (mm), y (mm), z (um)`
+(+ `time` for time-lapse), one row per FOV, mirroring classic multipoint. Written from the same stage
+values; the OME `translation` is authoritative if the two ever disagree.
 
 ### events.jsonl  (fallback: file-watch + poll)
 Experiment root, append-only, one JSON object/line, each has `type`,`ts`,`format_version`.

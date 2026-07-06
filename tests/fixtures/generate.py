@@ -25,6 +25,21 @@ def _patch_zarr_json(store_dir: Path, attributes: dict):
     zj.write_text(json.dumps(meta, indent=2))
 
 
+_AXES = [{"name": "t", "type": "time", "unit": "second"}, {"name": "c", "type": "channel"},
+         {"name": "z", "type": "space", "unit": "micrometer"},
+         {"name": "y", "type": "space", "unit": "micrometer"},
+         {"name": "x", "type": "space", "unit": "micrometer"}]
+
+
+def _multiscales(path, squid, z_um, y_um, x_um):
+    # per-FOV placement (CONTRACT.md): scale MUST precede translation (OME-NGFF rule);
+    # scale mirrors the store's _squid values, translation = absolute stage position in um
+    return [{"axes": _AXES, "datasets": [{"path": path, "coordinateTransformations": [
+        {"type": "scale", "scale": [squid["time_increment_s"], 1.0, squid["z_step_um"],
+                                    squid["pixel_size_um"], squid["pixel_size_um"]]},
+        {"type": "translation", "translation": [0.0, 0.0, z_um, y_um, x_um]}]}]}]
+
+
 def _omero(channels):  # channels: list[(label,color_hex)]
     return {"channels": [
         {"label": lbl, "color": col, "active": True,
@@ -69,12 +84,13 @@ def generate_experiment(root, *, wells, fovs_per_well, nt, recording_frames,
             for k in range(fovs_per_well):
                 last = (t == nt-1 and wi == n_wells-1 and k == fovs_per_well-1)
                 partial = last and not complete
-                x_mm, y_mm = 10.0 + wi*9 + (k % 3)*0.3, 10.0 + (k // 3)*0.3
-                coords.append(f"{wl},{k},0,{x_mm:.3f},{y_mm:.3f},3000.0"
+                x_mm, y_mm, z_ref_mm = 10.0 + wi*9 + (k % 3)*0.3, 10.0 + (k // 3)*0.3, 3.0
+                z_ref_um = z_ref_mm * 1000  # OME translations are in um (axis unit)
+                coords.append(f"{wl},{k},0,{x_mm:.3f},{y_mm:.3f},{z_ref_um:.1f}"
                               + (f",{t}" if time_lapse else ""))
                 # ---- recording: one store per plane ----
                 ev(type="fov_started", t=t, region=wl, fov=k, phase="recording",
-                   x_mm=x_mm, y_mm=y_mm, z_ref_mm=3.0)  # once per (t,region,fov,phase)
+                   x_mm=x_mm, y_mm=y_mm, z_ref_mm=z_ref_mm)  # once per (t,region,fov,phase)
                 for j in range(recording_planes):
                     name = f"fov_{k}.ome.zarr" if recording_planes == 1 else f"fov_{k}_z{j}.ome.zarr"
                     sd = root / "recording" / f"t{t}" / wl / name
@@ -89,8 +105,11 @@ def generate_experiment(root, *, wells, fovs_per_well, nt, recording_frames,
                     if recording_planes > 1:
                         squid |= {"plane_index": j, "plane_z_offset_um": -2.0 + j*2.0,
                                   "n_planes": recording_planes}
-                    _patch_zarr_json(sd, {"ome": {"multiscales": [{"datasets": [{"path": "."}],
-                                     "axes": [{"name": a} for a in "tczyx"]}],
+                    # plane stores share the FOV's XY; Z = z_ref + per-plane offset
+                    z_um = z_ref_um + squid.get("plane_z_offset_um", 0.0)
+                    _patch_zarr_json(sd, {"ome": {
+                                     "multiscales": _multiscales(".", squid, z_um,
+                                                                 y_mm*1000, x_mm*1000),
                                      "omero": _omero([("REC", "#FFFFFF")])},
                                      "_squid": squid})
                     if not partial:
@@ -99,7 +118,7 @@ def generate_experiment(root, *, wells, fovs_per_well, nt, recording_frames,
                            captured=n_written, expected=recording_frames)
                 # ---- z-stack: one store per (well,fov), T axis accumulates ----
                 ev(type="fov_started", t=t, region=wl, fov=k, phase="zstack",
-                   x_mm=x_mm, y_mm=y_mm, z_ref_mm=3.0)
+                   x_mm=x_mm, y_mm=y_mm, z_ref_mm=z_ref_mm)
                 grp = root / "zarr" / wl / f"fov_{k}.ome.zarr"
                 arrp = grp / "0"
                 nc = len(zstack_channels)
@@ -111,14 +130,16 @@ def generate_experiment(root, *, wells, fovs_per_well, nt, recording_frames,
                     for z in range(zstack_nz if not partial else 1):
                         a[t, c, z].write(_synthetic(h, w, seed=9+t+c*3+z)).result()
                 grp.mkdir(parents=True, exist_ok=True)
+                zsquid = {"structure": "5D-TCZYX", "pixel_size_um": 0.5,
+                          "z_step_um": 1.0, "time_increment_s": 60.0,
+                          "acquisition_complete": (not partial)}
                 (grp / "zarr.json").write_text(json.dumps({
                     "zarr_format": 3, "node_type": "group",
-                    "attributes": {"ome": {"multiscales": [{"datasets": [{"path": "0"}],
-                                   "axes": [{"name": ax} for ax in "tczyx"]}],
+                    "attributes": {"ome": {  # same XY as this FOV's recording store(s)
+                                   "multiscales": _multiscales("0", zsquid, z_ref_um,
+                                                               y_mm*1000, x_mm*1000),
                                    "omero": _omero(zstack_channels)},
-                                   "_squid": {"structure": "5D-TCZYX", "pixel_size_um": 0.5,
-                                   "z_step_um": 1.0, "time_increment_s": 60.0,
-                                   "acquisition_complete": (not partial)}}}, indent=2))
+                                   "_squid": zsquid}}, indent=2))
                 if not partial:  # partial store never finalizes (same as recording phase)
                     ev(type="store_finalized", t=t, region=wl, fov=k, phase="zstack",
                        path=str(grp), acquisition_complete=True, aborted=False,
