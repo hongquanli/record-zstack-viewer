@@ -47,7 +47,8 @@ def generate_experiment(root, *, wells, fovs_per_well, nt, recording_frames,
     events = []
     def ev(**kw): events.append({**kw, "ts": 0.0, "format_version": "1.0"})
     ev(type="run_started", plate_format="96", wells=wells,
-       expected_fovs_per_well={wl: fovs_per_well for wl in wells}, Nt=nt, Nz=recording_planes,
+       expected_fovs_per_well={wl: fovs_per_well for wl in wells}, Nt=nt,
+       recording_nz=recording_planes, zstack_nz=zstack_nz,
        channels=[{"label": l, "color": c} for l, c in zstack_channels],
        fps=15.0, duration_s=recording_frames/15.0)
 
@@ -122,7 +123,8 @@ def generate_experiment(root, *, wells, fovs_per_well, nt, recording_frames,
                     ev(type="store_finalized", t=t, region=wl, fov=k, phase="zstack",
                        path=str(grp), acquisition_complete=True, aborted=False,
                        captured=nc*zstack_nz, expected=nc*zstack_nz)
-        ev(type="timepoint_done", t=t)
+        if complete or t < nt - 1:  # partial final timepoint: producer hasn't emitted it yet
+            ev(type="timepoint_done", t=t)
 
     if complete:
         ev(type="run_done")

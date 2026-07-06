@@ -32,7 +32,8 @@ for time-lapse). One row per FOV. Mirrors classic multipoint.
 ### events.jsonl  (fallback: file-watch + poll)
 Experiment root, append-only, one JSON object/line, each has `type`,`ts`,`format_version`.
 - `run_started`: {plate_format, wells:[...], expected_fovs_per_well:{well:int},
-  Nt, Nz, channels:[{label,color}], fps, duration_s}
+  Nt, recording_nz (planes per recording), zstack_nz (z-stack planes),
+  channels:[{label,color}], fps, duration_s}
 - `fov_started`: {t, region, fov, phase:"recording"|"zstack", x_mm, y_mm, z_ref_mm}
 - `heartbeat`: {t, region, fov, phase, written:int}   (throttled)
 - `store_finalized`: {t, region, fov, phase, path, acquisition_complete, aborted, captured, expected}
