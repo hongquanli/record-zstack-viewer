@@ -91,3 +91,32 @@ def test_fov_source_protocol_rejects_incomplete_object():
         dims = ()
 
     assert not isinstance(Missing(), FovSource)
+
+
+# ---- Task 1.4: RecordingFovSource + multi-plane compositor ------------------
+
+def test_recording_source_dims_and_planes(tiny_experiment):
+    from record_zstack_viewer.reader.zarr_v3 import build_recording_source
+    s = build_recording_source(tiny_experiment, well="A1", fov=0, context=default_context())
+    assert s.dims == ("acq_t", "frame", "z", "y", "x")
+    assert s.shape == (2, 5, 3, 64, 64)                    # 2 timepoints, 5 frames, 3 planes
+    assert s.read_plane({"acq_t": 1, "frame": 4, "z": 2}).shape == (64, 64)
+
+
+def test_single_plane_recording_has_z1(tiny_experiment_poor):
+    from record_zstack_viewer.reader.zarr_v3 import build_recording_source
+    s = build_recording_source(tiny_experiment_poor, well="A1", fov=0, context=default_context())
+    assert s.shape[2] == 1
+
+
+def test_recording_source_conforms_to_protocol(tiny_experiment):
+    from record_zstack_viewer.reader.zarr_v3 import build_recording_source
+    s = build_recording_source(tiny_experiment, well="A1", fov=0, context=default_context())
+    assert isinstance(s, FovSource)
+
+
+def test_recording_dtype_is_numpy_not_tensorstore(tiny_experiment):
+    from record_zstack_viewer.reader.zarr_v3 import build_recording_source
+    s = build_recording_source(tiny_experiment, well="A1", fov=0, context=default_context())
+    # FovSource protocol + downstream expect a numpy dtype, not ts.dtype
+    assert isinstance(s.dtype, np.dtype) and s.dtype == np.uint16
