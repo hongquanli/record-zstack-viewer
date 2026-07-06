@@ -1,0 +1,21 @@
+# Brainstorming / visual-companion artifacts (mockups persist on disk, not tracked)
+.superpowers/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Viewer thumbnail cache (normally in platformdirs; guard against in-folder opt-in)
+.ndviewer_cache/
+
+# OS
+.DS_Store
