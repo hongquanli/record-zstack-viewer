@@ -372,15 +372,15 @@ class ExperimentModel:
         nx, ny = fov_grid_shape(scan_xy, overlap, (fov_w, fov_h))
         # geometry can miss the true tile count by one at region edges; size the grid
         # to the FOVs actually present so each index maps to a real cell.
-        need = max(fov_slots) + 1                        # highest S-pattern index in use
+        need = max(fov_slots) + 1                        # highest acquisition index in use
         nx, ny = _reconcile_grid(nx, ny, need)
 
         step_x = fov_w * (1.0 - overlap / 100.0)
         step_y = fov_h * (1.0 - overlap / 100.0)
         x0 = cx - (nx - 1) / 2.0 * step_x                # grid centered on the region
         y0 = cy - (ny - 1) / 2.0 * step_y
-        index_to_ij = (unidirectional_index_to_ij
-                       if _is_unidirectional(scan) else spattern_index_to_ij)
+        index_to_ij = (spattern_index_to_ij
+                       if _is_serpentine(scan) else unidirectional_index_to_ij)
 
         out: dict[int, tuple[float, float]] = {}
         for fov in fov_slots:
@@ -433,14 +433,15 @@ def _as_xy(v) -> tuple[float, float]:
     return float(v), float(v)
 
 
-def _is_unidirectional(scan: dict) -> bool:
-    """Whether the intra-region FOV order is raster (not squid's default serpentine).
+def _is_serpentine(scan: dict) -> bool:
+    """Whether the intra-region FOV order is serpentine (not squid's default raster).
 
-    squid scans a region's FOVs serpentine (S-pattern) by default; treat an
-    explicit unidirectional/raster hint in `wellplate_scan` as the exception.
+    squid's default intra-well FOV order is Unidirectional (raster — every row
+    left->right; squid `_def.py` sets `FOV_PATTERN = "Unidirectional"`); treat an
+    explicit s-pattern/serpentine hint in `wellplate_scan` as the opt-in exception.
     """
     hint = str(scan.get("fov_pattern") or scan.get("pattern") or scan.get("xy_mode") or "")
-    return any(w in hint.lower() for w in ("unidirection", "raster"))
+    return any(w in hint.lower() for w in ("s-pattern", "spattern", "s_pattern", "serpentine"))
 
 
 def _reconcile_grid(nx: int, ny: int, need: int) -> tuple[int, int]:

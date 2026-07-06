@@ -137,6 +137,38 @@ def test_model_reconstructs_from_geometry(tmp_path):
     assert len({f.xy_mm for f in fovs}) == 6
 
 
+def test_reconstruction_uses_raster_fov_order(tmp_path):
+    """Reconstruction (step 3) must place FOVs in squid's DEFAULT intra-region order,
+    Unidirectional (raster — every row left->right), NOT serpentine.
+
+    Pins the reconstructed FOV order for a multi-row grid (2 rows x 3 cols): the
+    second (odd) row must NOT be column-reversed. Fails on a serpentine default.
+    """
+    root = generate_experiment(
+        tmp_path / "exp", wells=["A1"], fovs_per_well=6, nt=1,
+        recording_frames=3, recording_planes=1,
+        zstack_channels=[("DAPI", "#4a9eff")], zstack_nz=2, rich=False)
+    _strip_translations(root)
+    _assert_positions_absent(root)                   # step 1 unavailable
+    assert not (root / "coordinates.csv").exists()   # step 2 unavailable -> forces recon
+
+    m = ExperimentModel(root, default_context())
+    xy = {f.fov: f.xy_mm for f in m.fovs("A1")}
+    assert len(xy) == 6 and all(v is not None for v in xy.values())
+
+    # reconciled grid is 3 cols x 2 rows: fov 0,1,2 = row 0; fov 3,4,5 = row 1.
+    assert len({round(v[1], 6) for v in xy.values()}) == 2      # two distinct rows (y)
+    assert len({round(v[0], 6) for v in xy.values()}) == 3      # three distinct cols (x)
+    assert xy[3][1] > xy[0][1]                                  # row 1 sits below row 0
+
+    # RASTER: both rows run left->right. The odd row is NOT reversed, so its x
+    # increases with fov index and aligns column-for-column with the first row.
+    assert xy[0][0] < xy[1][0] < xy[2][0]                       # row 0 left->right
+    assert xy[3][0] < xy[4][0] < xy[5][0]                       # row 1 left->right (serpentine -> reversed, FAILS)
+    assert xy[3][0] == pytest.approx(xy[0][0])                  # fov 3 back at col 0 (serpentine puts it at col 2)
+    assert xy[5][0] == pytest.approx(xy[2][0])                  # fov 5 at col 2 (serpentine puts it at col 0)
+
+
 # --- step 4: no wellplate_scan -> flat list, xy_mm None ----------------------
 
 def test_current_position_flat_list_no_positions(tmp_path):

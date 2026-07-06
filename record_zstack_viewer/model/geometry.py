@@ -5,8 +5,10 @@ No Qt, no IO, no tensorstore — every symbol here is a pure function or a froze
 constant. This module is the **fallback** for per-FOV placement: the primary
 path derives a FOV's position from the OME `translation`
 (`FovMetadata.position_um`), and this geometry only reconstructs positions for
-pre-translation data. The scan-pattern order therefore has to be exactly right
-for that older data, which is why `spattern_index_to_ij` is nailed down by test.
+pre-translation data. squid's default intra-region FOV order is Unidirectional
+(raster — every row left->right); S-pattern (serpentine) is opt-in. The order
+therefore has to be exactly right for that older data, which is why both
+`unidirectional_index_to_ij` and `spattern_index_to_ij` are nailed down by test.
 
 Plate-format numbers are copied from squid's `sample_formats.csv`.
 """
