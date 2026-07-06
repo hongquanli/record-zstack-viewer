@@ -76,6 +76,8 @@ README.md
 
 # Phase 0 — Contract + fixtures + validator (the shared truth)
 
+> **AS-BUILT NOTE (2026-07-06):** Phase 0 is implemented and committed on branch `phase0-contract`. The embedded code blocks below (the Task 0.2 `CONTRACT.md` text and the Task 0.3 fixture) are the *original* plan and are **superseded** by the committed artifacts. Deltas applied during execution: channels nested under `ome.omero` (not spread); manifest `Nz` split into `recording_nz`/`zstack_nz`; and a per-FOV `coordinateTransformations` `[scale, translation]` added (translation = stage position in µm). **Authoritative: `CONTRACT.md` + the committed code** (`tests/fixtures/generate.py`, `record_zstack_viewer/contract/validate.py`). Treat the Phase-0 snippets below as historical.
+
 ### Task 0.1: Package skeleton + `pyproject.toml` + contract version
 
 **Files:**
@@ -598,7 +600,7 @@ def test_spattern_serpentine():
 - Produces:
   - `@dataclass FovNode{well:str, fov:int, has_recording:bool, has_zstack:bool, xy_mm:tuple[float,float]|None, status:str}` (`status ∈ {"empty","in_progress","complete","aborted"}`).
   - `ExperimentModel(root:Path, context)` with `wells()->list[str]`, `fovs(well)->list[FovNode]`, `fov_count_expected(well)->int|None`, `plate_format()->str`, `open_fov(well,fov)->FovDatasets`, `refresh()`.
-  - Positioning: read `coordinates.csv` when present (mm-exact); else reconstruct via `geometry` from `acquisition.yaml`; else (no `wellplate_scan`) flat FOV list with `xy_mm=None`.
+  - Positioning (translation-first): read the per-store OME `coordinateTransformations.translation` when present (mm-exact); else `coordinates.csv`; else reconstruct via `geometry` from `acquisition.yaml`; else (no `wellplate_scan`) flat FOV list with `xy_mm=None`.
 
 - [ ] **Step 1: Write failing tests**
 ```python
@@ -609,7 +611,7 @@ def test_model_lists_wells_and_fovs(tiny_experiment):
     assert set(m.wells()) == {"A1","B2"}
     f = m.fovs("A1")[0]
     assert f.has_recording and f.has_zstack and f.status == "complete"
-    assert f.xy_mm is not None                     # from coordinates.csv
+    assert f.xy_mm is not None                     # from the store's OME translation (or coordinates.csv)
 
 def test_model_reconstructs_without_coords(tiny_experiment_poor):
     from record_zstack_viewer.model.experiment import ExperimentModel
