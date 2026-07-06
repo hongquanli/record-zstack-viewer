@@ -10,6 +10,7 @@ one visible plane / tile — never a whole array (Global Constraints).
 """
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -19,6 +20,65 @@ import tensorstore as ts
 from record_zstack_viewer.cache.memory import open_array
 from record_zstack_viewer.reader.metadata import (
     FovMetadata, fov_metadata_from_attrs, read_store_zarr_json)
+
+
+# --- live written-count via on-disk chunk presence (Task 1.5) ----------------
+# Under the default FAST compression each written frame/timepoint is its own chunk
+# file, so counting present chunk keys (one `scandir`, never a stat per frame) gives
+# the real filled extent. Under sharding one shard file aggregates many chunks, so
+# presence no longer maps to a single frame — callers must fall back to the declared
+# size (see `_is_sharded` / `is_extent_exact`).
+
+def _array_codecs(array_node_dir: Path) -> list:
+    """The `codecs` list of an ARRAY node's zarr.json (empty if unreadable)."""
+    try:
+        return read_store_zarr_json(array_node_dir).get("codecs") or []
+    except (OSError, ValueError):
+        return []
+
+
+def _is_sharded(array_node_dir: Path, squid: dict) -> bool:
+    """True when the store uses the sharding codec (BALANCED/BEST compression).
+
+    A shard file aggregates many inner chunks, so per-frame presence can't be read
+    off disk. The on-disk codec is authoritative; `_squid.compression` is a hint.
+    """
+    if any((c or {}).get("name") == "sharding_indexed" for c in _array_codecs(array_node_dir)):
+        return True
+    return str(squid.get("compression", "")).upper() in ("BALANCED", "BEST")
+
+
+def _count_dim0_chunks(array_node_dir: Path) -> int:
+    """Present chunk indices along dim 0 = entries under `c/`, in one scandir pass.
+
+    Valid when dims 1.. are single-chunk (recording frame stores): each `c/{i}` dir
+    is one written frame. Missing `c/` (nothing written yet) → 0.
+    """
+    try:
+        with os.scandir(array_node_dir / "c") as it:
+            return sum(1 for _ in it)
+    except FileNotFoundError:
+        return 0
+
+
+def _complete_dim0_chunks(array_node_dir: Path, per_index: int) -> int:
+    """Count dim-0 indices whose full orthogonal chunk set (`per_index` leaves) is
+    present — a z-stack timepoint is 'done' only once all its (c, z) chunks exist.
+
+    Walks `c/{t}/{c}/{z}` (one pass over present chunks, not a stat per index) and is
+    ragged-safe: each timepoint is judged on its own leaf count, not an assumed one.
+    """
+    try:
+        t_dirs = [e for e in os.scandir(array_node_dir / "c") if e.is_dir()]
+    except FileNotFoundError:
+        return 0
+    complete = 0
+    for t in t_dirs:
+        leaves = sum(1 for c in os.scandir(t.path) if c.is_dir()
+                     for z in os.scandir(c.path) if z.is_dir())
+        if leaves >= per_index:
+            complete += 1
+    return complete
 
 
 class ZStackFovSource:
@@ -41,6 +101,10 @@ class ZStackFovSource:
         self.dtype: np.dtype = np.dtype(self._arr.dtype.numpy_dtype)
         attrs = read_store_zarr_json(self._group_dir).get("attributes") or {}
         self.metadata: FovMetadata = fov_metadata_from_attrs(attrs)
+        # live-extent probing (Task 1.5): the pixel array is the `/0` node
+        self._array_dir = self._group_dir / "0"
+        self._squid: dict = attrs.get("_squid") or {}
+        self._sharded = _is_sharded(self._array_dir, self._squid)
 
     def _plane_view(self, index: dict[str, int]) -> ts.TensorStore:
         """Lazy (y, x) view for `index`, selecting non-spatial axes by NAME."""
@@ -57,11 +121,20 @@ class ZStackFovSource:
     def filled_extent(self, axis: str) -> int:
         """Leading count of real (non-fill) data along `axis`.
 
-        Minimal Task-1.3 stub: report the declared size — correct for a complete
-        store. The FAST chunk-presence probing for live/partial stores lands in
-        Task 1.5.
+        `acq_t` is the live-growing axis: report the number of timepoints whose full
+        (c, z) chunk set is on disk (a half-written timepoint isn't counted). Other
+        axes, and any sharded store, report the declared size (see `is_extent_exact`).
         """
-        return self.shape[self.dims.index(axis)]
+        n = self.shape[self.dims.index(axis)]
+        if axis != "acq_t" or self._sharded:
+            return n
+        return _complete_dim0_chunks(self._array_dir, self.shape[1] * self.shape[2])
+
+    def is_extent_exact(self) -> bool:
+        """Whether `filled_extent` reflects true on-disk presence: True for FAST
+        chunk-per-file stores, False under sharding (one shard hides per-frame
+        presence, so the declared extent is returned as a whole-store 'acquiring')."""
+        return not self._sharded
 
 
 def _squid_of(store_dir: Path) -> dict:
@@ -148,6 +221,8 @@ class RecordingFovSource:
         meta.plane_z_offsets = [
             float(_squid_of(store).get("plane_z_offset_um", 0.0)) for _pidx, store in ref_planes]
         self.metadata: FovMetadata = meta
+        # live-extent probing (Task 1.5): recording stores are arrays at their root
+        self._sharded = _is_sharded(ref_store, _squid_of(ref_store))
 
     def _plane_view(self, index: dict[str, int]) -> ts.TensorStore:
         """Lazy (y, x) view of `frame` in the store for `(acq_t, z)`.
@@ -169,10 +244,27 @@ class RecordingFovSource:
     def filled_extent(self, axis: str) -> int:
         """Leading count of real (non-fill) data along `axis`.
 
-        Minimal Task-1.4 stub: report the declared size. FAST chunk-presence
-        probing for live/partial recordings lands in Task 1.5.
+        `frame` is the live-growing axis: report the frames guaranteed present in
+        EVERY `(acq_t, z)` store — the acquisition frontier, robust to ragged
+        timepoints. Preference is `_squid.captured_frames`; else count `c/` chunk
+        dirs (one scandir). `acq_t` equals the present `t{t}` dir count (dense over
+        the timepoints this source was built from); other axes, and any sharded
+        store, report the declared size (see `is_extent_exact`).
         """
-        return self.shape[self.dims.index(axis)]
+        n = self.shape[self.dims.index(axis)]
+        if axis != "frame" or self._sharded:
+            return n
+        counts = []
+        for store in set(self._store.values()):
+            cf = _squid_of(store).get("captured_frames")
+            counts.append(int(cf) if cf is not None else _count_dim0_chunks(store))
+        return min(counts) if counts else n
+
+    def is_extent_exact(self) -> bool:
+        """Whether `filled_extent` reflects true on-disk presence: True for FAST
+        chunk-per-file recordings, False under sharding (per-frame presence is
+        unreadable, so the declared extent is returned as a whole-store 'acquiring')."""
+        return not self._sharded
 
 
 def build_recording_source(root: str | Path, well: str, fov: int,
