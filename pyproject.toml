@@ -1,0 +1,13 @@
+[project]
+name = "record-zstack-viewer"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  "tensorstore>=0.1.60", "numpy>=1.26", "ndv>=0.3", "vispy>=0.14",
+  "qtpy>=2.4", "PyQt5>=5.15", "pyqtgraph>=0.13", "PyYAML>=6", "platformdirs>=4",
+]
+[project.optional-dependencies]
+test = ["pytest>=8"]
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
