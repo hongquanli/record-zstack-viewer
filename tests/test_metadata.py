@@ -52,6 +52,18 @@ def test_position_um_from_translation(tiny_experiment):
     assert m.position_um == (10000.0, 10000.0, 3000.0)  # (x, y, z) in um
 
 
+def test_position_um_xy_not_swapped(tiny_experiment):
+    # B2 fov 0 sits at x=19 mm, y=10 mm, so translation x != y. This discriminates the
+    # (translation[4]=x, translation[3]=y) mapping from a swapped one — unlike A1 where x==y.
+    from record_zstack_viewer.reader.metadata import read_store_zarr_json, fov_metadata_from_attrs
+    attrs = read_store_zarr_json(tiny_experiment/"zarr"/"B2"/"fov_0.ome.zarr")["attributes"]
+    ct = attrs["ome"]["multiscales"][0]["datasets"][0]["coordinateTransformations"]
+    translation = next(x["translation"] for x in ct if x["type"] == "translation")
+    assert translation[4] != translation[3]  # x != y, so an X/Y swap would be detectable here
+    m = fov_metadata_from_attrs(attrs)
+    assert m.position_um == (translation[4], translation[3], translation[2])  # (x, y, z) um
+
+
 def test_recording_plane_shares_xy_with_zstack(tiny_experiment):
     from record_zstack_viewer.reader.metadata import read_store_zarr_json, fov_metadata_from_attrs
     zst = fov_metadata_from_attrs(read_store_zarr_json(
