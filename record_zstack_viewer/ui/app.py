@@ -119,6 +119,13 @@ class MainWindow(QMainWindow):
         self._live_timer.timeout.connect(self._on_live_timer)
         self._live_timer.start()
 
+        # Drop an experiment folder here to open it in a NEW window (via the
+        # controller). WA_DeleteOnClose makes the window actually go away on
+        # close so the controller's `destroyed`-hook deregisters it; closeEvent
+        # stops the live timer FIRST, so no tick ever runs on a deleted window.
+        self.setAcceptDrops(True)
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
+
     # ------------------------------ public API -------------------------------
 
     @property
@@ -248,8 +255,41 @@ class MainWindow(QMainWindow):
                    for n in self._model.fovs(w) if n.status == "complete")
         self.coverage_label.setText(f"{done}/{self._model_total()} FOVs")
 
+    # ------------------------------ drag-and-drop ----------------------------
+
+    def dragEnterEvent(self, event):  # noqa: N802 (Qt naming)
+        """Accept a drop that carries at least one local-file URL."""
+        md = event.mimeData()
+        if md.hasUrls() and any(u.isLocalFile() for u in md.urls()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):  # noqa: N802
+        """Open each dropped local path that is an experiment (in a new window)."""
+        md = event.mimeData()
+        self._handle_dropped_paths(
+            [u.toLocalFile() for u in md.urls() if u.isLocalFile()])
+        event.acceptProposedAction()
+
+    def _handle_dropped_paths(self, paths: list[str]) -> None:
+        """Open every dropped path that `is_experiment` via the controller.
+
+        Each open is a NEW window sharing the controller's one cache_pool. With
+        no controller (e.g. a standalone window) this is a clean no-op.
+        """
+        from record_zstack_viewer.ui.controller import is_experiment  # lazy: avoid a cycle
+        if self._controller is None:
+            return
+        for p in paths:
+            root = Path(p)
+            if is_experiment(root):
+                self._controller.open_experiment(root)   # -> NEW window
+
     # -------------------------------- lifecycle ------------------------------
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        # Stop the live QTimer BEFORE the window is deleted (WA_DeleteOnClose
+        # schedules deletion once this accepted close returns), so a closing or
+        # closed window never ticks. The subsequent `destroyed` signal lets the
+        # ViewerController deregister this window from its registry.
         self._live_timer.stop()
         super().closeEvent(event)

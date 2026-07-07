@@ -337,6 +337,63 @@ def test_live_refresh_enables_mode_button_when_other_phase_appears(
     win.close()
 
 
+# ---------------------------- drag-drop + lifecycle ---------------------------
+
+def test_mainwindow_uses_injected_context(qapp, tiny_experiment):
+    """The injected context is used as-is (one shared cache_pool for all windows)."""
+    from record_zstack_viewer.cache.memory import default_context
+    ctx = default_context()
+    w = MainWindow(tiny_experiment, context=ctx)
+    assert w._context is ctx                             # did NOT build its own
+    w.close()
+
+
+def test_mainwindow_drop_opens_via_controller(qapp, tiny_experiment):
+    """A dropped experiment directory opens through the controller (new window)."""
+    calls = []
+
+    class StubController:
+        context = None
+
+        def open_experiment(self, root):
+            calls.append(Path(root))
+            return None
+
+    w = MainWindow(tiny_experiment, controller=StubController())
+    w._handle_dropped_paths([str(tiny_experiment)])      # helper exercised directly
+    assert calls == [tiny_experiment]
+    w.close()
+
+
+def test_mainwindow_drop_without_controller_is_noop(qapp, tiny_experiment):
+    """No controller -> dropping is a clean no-op (never raises)."""
+    w = MainWindow(tiny_experiment)                      # no controller
+    w._handle_dropped_paths([str(tiny_experiment)])      # must not raise
+    w.close()
+
+
+def test_mainwindow_close_stops_timer_and_deregisters(qapp, tiny_experiment):
+    """Lifecycle: closing a controller-owned window stops its live QTimer and,
+    via WA_DeleteOnClose -> destroyed, deregisters it from the controller so a
+    closed window never ticks and never lingers in the registry."""
+    from qtpy.QtCore import QEvent
+    from record_zstack_viewer.ui.controller import ViewerController
+    controller = ViewerController()
+    win = controller.open_experiment(tiny_experiment)
+    assert win in controller.windows()                   # registered on open
+    assert win._live_timer.isActive()                    # live timer runs while open
+
+    timer = win._live_timer                              # keep a handle before deletion
+    win.close()
+    assert not timer.isActive()                          # stopped in closeEvent, BEFORE deletion
+    # WA_DeleteOnClose posts the deletion via deleteLater(); with no running
+    # exec() loop, DeferredDelete must be flushed explicitly (processEvents()
+    # alone won't deliver it at loop level 0).
+    qapp.processEvents()
+    qapp.sendPostedEvents(None, QEvent.DeferredDelete)   # delete window -> destroyed fires
+    assert controller.windows() == []                    # controller deregistered the closed window
+
+
 # --------------------------------- CLI entry ----------------------------------
 
 def test_cli_help_smoke():
