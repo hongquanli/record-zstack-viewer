@@ -411,3 +411,18 @@ def test_cli_rejects_missing_root(tmp_path):
     with pytest.raises(SystemExit) as exc:
         main([str(tmp_path / "does_not_exist")])
     assert exc.value.code == 2
+
+
+def test_main_no_path_builds_launcher(qapp):
+    import record_zstack_viewer.__main__ as m
+    app, controller, launcher = m._build([])           # no path -> launcher
+    assert launcher is not None
+    assert controller.launcher is launcher
+    assert controller.windows() == []                  # no viewer opened yet
+
+
+def test_main_valid_path_opens_directly(qapp, tiny_experiment):
+    import record_zstack_viewer.__main__ as m
+    app, controller, launcher = m._build([str(tiny_experiment)])
+    assert launcher is None                             # direct open, no launcher
+    assert len(controller.windows()) == 1
