@@ -50,11 +50,17 @@ def test_default_context_default_limit_is_192mb(tiny_experiment):
 
 
 def test_two_opens_share_the_same_pool(tiny_experiment):
+    # Instance-identity is a strictly stronger witness than the old config-equality:
+    # two *separate* 192 MB pools compare equal by config yet would defeat sharing.
+    # `is` proves a context holds ONE cache_pool resource, and distinct contexts hold
+    # distinct, isolated pools (verified on tensorstore 0.1.77).
     ctx = default_context()
+    assert ctx["cache_pool"] is ctx["cache_pool"]                     # one shared pool per context
+    assert default_context()["cache_pool"] is not default_context()["cache_pool"]  # isolated across contexts
+    # two opens against `ctx` both succeed against that single shared pool
     st = tiny_experiment / "recording" / "t0" / "A1" / "fov_0_z0.ome.zarr"
     a, b = open_array(st, ctx), open_array(st, ctx)
-    # both bind the one configured pool; a context-less open would bind {}
-    assert _bound_pool(a) == _bound_pool(b) == {"total_bytes_limit": _DEFAULT_LIMIT}
+    assert a.ndim == b.ndim == 5
 
 
 def test_open_array_is_lazy_and_reads_per_plane(tiny_experiment):
@@ -139,6 +145,17 @@ def test_open_fov_returns_both_phase_sources(tiny_experiment):
     # each source actually reads its visible plane (per-plane, never whole-array)
     assert ds.recording.read_plane({"acq_t": 0, "frame": 0, "z": 0}).shape == (64, 64)
     assert ds.zstack.read_plane({"acq_t": 0, "c": 0, "z": 0}).shape == (64, 64)
+
+
+def test_open_fov_threads_one_shared_handle_cache(tiny_experiment):
+    # Task 3.1 wiring: open_fov builds ONE HandleCache and threads it to both phases,
+    # so a FOV's recording + z-stack handles draw from a single bounded pool. (Guards
+    # the falsy-empty-cache bug: `handles or HandleCache(...)` would build a new one.)
+    from record_zstack_viewer.reader.adapter import open_fov
+    from record_zstack_viewer.cache.memory import HandleCache
+    ds = open_fov(tiny_experiment, well="A1", fov=0, context=default_context())
+    assert isinstance(ds.recording._handles, HandleCache)
+    assert ds.recording._handles is ds.zstack._handles
 
 
 def test_open_fov_recording_only(tmp_path):

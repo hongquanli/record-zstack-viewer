@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import tensorstore as ts
 
-from record_zstack_viewer.cache.memory import open_array
+from record_zstack_viewer.cache.memory import HandleCache
 from record_zstack_viewer.reader.metadata import (
     FovMetadata, fov_metadata_from_attrs, read_store_zarr_json)
 
@@ -95,9 +95,15 @@ class ZStackFovSource:
 
     dims: tuple[str, ...] = ("acq_t", "c", "z", "y", "x")
 
-    def __init__(self, group_dir: str | Path, context: ts.Context):
+    def __init__(self, group_dir: str | Path, context: ts.Context,
+                 handles: HandleCache | None = None):
         self._group_dir = Path(group_dir)
-        self._arr = open_array(self._group_dir / "0", context)
+        # Open the `/0` array once through a store-handle LRU (Task 3.1). A shared
+        # `handles` (threaded by `open_fov`) lets both phases of a FOV draw from one
+        # bounded pool of handles; absent that, build a per-source cache from `context`.
+        # Test `is None`, not truthiness: an empty HandleCache is falsy (it has __len__).
+        self._handles = handles if handles is not None else HandleCache(context)
+        self._arr = self._handles.get(self._group_dir / "0")
         self.shape: tuple[int, ...] = tuple(self._arr.shape)
         # ts.dtype -> np.dtype: the FovSource protocol and all downstream code
         # expect a numpy dtype, and `self._arr.dtype` is a tensorstore dtype.
@@ -191,8 +197,15 @@ class RecordingFovSource:
 
     dims: tuple[str, ...] = ("acq_t", "frame", "z", "y", "x")
 
-    def __init__(self, well_dir_by_t: dict[int, Path], fov: int, context: ts.Context):
-        self._context = context
+    def __init__(self, well_dir_by_t: dict[int, Path], fov: int, context: ts.Context,
+                 handles: HandleCache | None = None):
+        # Every read re-selects one per-(acq_t, plane) store, so route all opens
+        # through a store-handle LRU (Task 3.1): repeated reads of the same store
+        # reuse one handle instead of re-opening it. A shared `handles` (threaded by
+        # `open_fov`) bounds concurrent handles across a FOV's phases; else build one
+        # from `context`. Decoded bytes stay bounded by the context's `cache_pool`.
+        # Test `is None`, not truthiness: an empty HandleCache is falsy (it has __len__).
+        self._handles = handles if handles is not None else HandleCache(context)
         self._fov = int(fov)
         acq_ts = sorted(well_dir_by_t)  # dense acq_t axis over sorted timepoints
         if not acq_ts:
@@ -210,7 +223,7 @@ class RecordingFovSource:
 
         ref_planes = planes_by_acq[0]          # reference timepoint defines the axes
         ref_store = ref_planes[0][1]
-        ref_arr = open_array(ref_store, context)
+        ref_arr = self._handles.get(ref_store)
         t_frames, _c, _z, ny, nx = ref_arr.shape
         self.shape: tuple[int, ...] = (
             len(acq_ts), int(t_frames), len(ref_planes), int(ny), int(nx))
@@ -230,10 +243,11 @@ class RecordingFovSource:
     def _plane_view(self, index: dict[str, int]) -> ts.TensorStore:
         """Lazy (y, x) view of `frame` in the store for `(acq_t, z)`.
 
-        Opens the one target store per call (bound to the shared cache_pool);
-        the store-handle LRU that avoids re-opening lands in Task 3.1.
+        Fetches the one target store's handle from the store-handle LRU (Task 3.1),
+        so repeated reads of the same store reuse a single handle rather than
+        re-opening it; decoded bytes remain bounded by the shared `cache_pool`.
         """
-        arr = open_array(self._store[(index["acq_t"], index["z"])], self._context)
+        arr = self._handles.get(self._store[(index["acq_t"], index["z"])])
         return arr[index["frame"], 0, 0]
 
     def read_plane(self, index: dict[str, int]) -> np.ndarray:
@@ -271,12 +285,14 @@ class RecordingFovSource:
 
 
 def build_recording_source(root: str | Path, well: str, fov: int,
-                           context: ts.Context) -> RecordingFovSource:
+                           context: ts.Context,
+                           handles: HandleCache | None = None) -> RecordingFovSource:
     """Assemble the `RecordingFovSource` for `(well, fov)` under `root`.
 
     Globs `recording/t*/{well}/fov_{fov}*.ome.zarr`, groups the matches by their
     `t{t}` dir into `well_dir_by_t`, and hands off to `RecordingFovSource` (which
-    orders each timepoint's sibling planes by `plane_index`). Raises
+    orders each timepoint's sibling planes by `plane_index`). `handles` (when given)
+    is the shared store-handle LRU threaded through to the source. Raises
     `FileNotFoundError` when no matching store exists.
     """
     root = Path(root)
@@ -293,4 +309,4 @@ def build_recording_source(root: str | Path, well: str, fov: int,
             well_dir_by_t[int(m.group(1))] = store.parent
     if not well_dir_by_t:
         raise FileNotFoundError(f"no recording store for well {well!r} fov {fov} under {rec}")
-    return RecordingFovSource(well_dir_by_t, fov, context)
+    return RecordingFovSource(well_dir_by_t, fov, context, handles)

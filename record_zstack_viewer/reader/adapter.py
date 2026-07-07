@@ -20,6 +20,7 @@ from typing import Protocol, runtime_checkable
 
 import tensorstore as ts
 
+from record_zstack_viewer.cache.memory import HandleCache
 from record_zstack_viewer.reader.fov_source import FovSource
 from record_zstack_viewer.reader.zarr_v3 import (
     ZStackFovSource, build_recording_source)
@@ -113,13 +114,17 @@ class ZarrV3Adapter:
 
     def open_fov(self, root: Path, well: str, fov: int,
                  context: ts.Context) -> FovDatasets:
+        # One store-handle LRU shared by both phases of this FOV (Task 3.1): repeated
+        # reads reuse handles, and the two phases' handles draw from a single bounded
+        # pool. Decoded bytes remain bounded separately by the context's cache_pool.
+        handles = HandleCache(context)
         recording: FovSource | None = None
         if self._has_recording(root, well, fov):
-            recording = build_recording_source(root, well, fov, context)
+            recording = build_recording_source(root, well, fov, context, handles)
         zstack: FovSource | None = None
         group = root / "zarr" / well / f"fov_{fov}.ome.zarr"
         if group.is_dir():
-            zstack = ZStackFovSource(group, context)
+            zstack = ZStackFovSource(group, context, handles)
         return FovDatasets(recording=recording, zstack=zstack)
 
 

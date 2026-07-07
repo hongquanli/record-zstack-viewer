@@ -69,3 +69,21 @@ def test_single_plane_metadata(tiny_experiment_poor):
     s = _source(tiny_experiment_poor)
     assert s.shape[2] == 1 and s.metadata.n_planes == 1
     assert s.read_plane({"acq_t": 0, "frame": 0, "z": 0}).shape == (64, 64)
+
+
+# ---- Task 3.1: reads reuse one store handle (no per-read re-open) ------------
+
+def test_reads_reuse_a_single_handle_per_store(tiny_experiment):
+    """The per-read re-open flagged in 1.4/1.5 is gone: the target store is opened
+    once via the source's HandleCache and reused across reads of the same store."""
+    from record_zstack_viewer.cache.memory import HandleCache
+    s = _source(tiny_experiment)
+    assert isinstance(s._handles, HandleCache)
+    store = s._store[(1, 2)]                            # the (acq_t=1, z=2) store
+    s.read_plane({"acq_t": 1, "frame": 4, "z": 2})     # opens it
+    handle = s._handles.get(store)
+    n = len(s._handles)
+    s.read_plane({"acq_t": 1, "frame": 0, "z": 2})     # same store, new frame
+    s.read_plane({"acq_t": 1, "frame": 2, "z": 2})     # same store again
+    assert len(s._handles) == n                          # not re-opened per read
+    assert s._handles.get(store) is handle              # same cached handle reused

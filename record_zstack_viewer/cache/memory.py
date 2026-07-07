@@ -12,11 +12,13 @@ Verified against tensorstore 0.1.77: `ts.Context({"cache_pool": {...}})` and
 """
 from __future__ import annotations
 
+from collections import OrderedDict
 from pathlib import Path
 
 import tensorstore as ts
 
 _DEFAULT_BYTE_LIMIT = 192 * 1024 * 1024  # 192 MB
+_DEFAULT_MAX_OPEN = 32
 
 
 def default_context(byte_limit: int = _DEFAULT_BYTE_LIMIT) -> ts.Context:
@@ -44,3 +46,47 @@ def open_array(path: str | Path, context: ts.Context) -> ts.TensorStore:
         },
         context=context,
     ).result()
+
+
+class HandleCache:
+    """A bounded LRU of opened TensorStore handles, all bound to one `context`.
+
+    The reader re-opens the same store constantly: every visible plane of a
+    recording re-selects one per-`(acq_t, plane)` store, and a fresh `open_array`
+    per read is wasteful (Tasks 1.4/1.5 flagged it). `get(path)` opens a store once
+    and returns that *same* handle on repeat, so reads reuse the handle.
+
+    Memory stays O(1) in dataset size on two independent axes: the shared
+    `cache_pool` (held by `context`) caps decoded *bytes*, and this LRU caps the
+    *number* of concurrently-open handles at `max_open`. Opening one more drops the
+    least-recently-used handle — a plain reference drop, which is how TensorStore
+    releases a handle (there is no explicit close) — so idle handles are freed.
+    """
+
+    def __init__(self, context: ts.Context, max_open: int = _DEFAULT_MAX_OPEN):
+        self._context = context
+        self._max_open = int(max_open)
+        # insertion-ordered path -> handle; front = least-recently-used.
+        self._handles: "OrderedDict[str, ts.TensorStore]" = OrderedDict()
+
+    def get(self, path: str | Path) -> ts.TensorStore:
+        """The opened handle for `path`, opening and caching it on first use.
+
+        A repeated `get` of the same path returns the identical handle (no re-open)
+        and marks it most-recently-used; opening beyond `max_open` distinct paths
+        evicts (drops the reference to) the least-recently-used handle.
+        """
+        key = str(path)
+        handle = self._handles.get(key)
+        if handle is not None:
+            self._handles.move_to_end(key)          # mark most-recently-used
+            return handle
+        handle = open_array(path, self._context)
+        self._handles[key] = handle                 # new key lands at the MRU end
+        while len(self._handles) > self._max_open:
+            self._handles.popitem(last=False)       # drop the LRU handle's reference
+        return handle
+
+    def __len__(self) -> int:
+        """The number of handles currently held (always <= `max_open`)."""
+        return len(self._handles)
