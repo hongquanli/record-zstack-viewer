@@ -25,12 +25,36 @@ pip install -e .
 ## Run
 
 ```bash
-python -m record_zstack_viewer /path/to/experiment
+python -m record_zstack_viewer /path/to/experiment   # open an experiment directly
+python -m record_zstack_viewer                        # no path -> drag-and-drop launcher
 ```
 
 The path is the experiment root (the directory holding `recording/` and/or
-`zarr/`); it defaults to the current directory. The window follows a growing
-acquisition automatically (a ~1 s UI-thread poll/tick).
+`zarr/`). Each window follows a growing acquisition automatically (a ~1 s
+UI-thread poll/tick).
+
+## Launcher & desktop shortcut
+
+Launched with **no path**, the app opens a small **launcher**: drop a Squid
+experiment folder onto it (or click **Browse…**) to open a viewer window. The
+launcher stays open, so you can open several experiments; dropping a folder
+onto an already-open viewer opens **another** window. All windows share one
+bounded memory pool.
+
+**Ubuntu desktop shortcut** (22.04 / 24.04 / 26.04) — run the installer *with
+the Python that has the package installed* so the shortcut launches that exact
+interpreter:
+
+```bash
+/path/to/env/bin/python scripts/install_desktop_shortcut.py --dry-run   # review first
+/path/to/env/bin/python scripts/install_desktop_shortcut.py             # install (app grid)
+/path/to/env/bin/python scripts/install_desktop_shortcut.py --uninstall
+```
+
+It installs the icon + a `.desktop` entry to `~/.local/share/…` (no sudo). On
+Wayland (24.04/26.04), if the image canvas is blank, re-run with `--force-x11`
+(launches via XWayland). `--desktop-copy` also drops a trusted icon on the
+Desktop.
 
 ## CPU / headless note
 
