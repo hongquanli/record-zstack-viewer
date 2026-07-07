@@ -1,22 +1,89 @@
 # record-zstack-viewer
 
-Standalone, memory-frugal desktop viewer for Squid **Record + Z-Stack** well-plate scans
-(OME-Zarr v3 from squid PR #564/#579): plate navigation, per-FOV recording playback and
-z-stack viewing, and live updates during an ongoing acquisition.
+Standalone, memory-frugal desktop viewer for Squid **Record + Z-Stack** well-plate
+scans stored as **OME-Zarr v3** (squid PR #564/#579). It gives you plate
+navigation, per-FOV recording playback and z-stack viewing, and live updates while
+an acquisition is still running.
 
-**Status:** design complete; implementation not started (planned for Opus).
+- **Plate navigator** — a hue-coded plate map (blue = complete, amber = acquiring,
+  grey = not-yet, red-✕ = aborted) plus an adaptive per-well FOV thumbnail strip.
+- **Per-FOV viewer** — a multi-plane *recording* `(acq_t, frame, z, y, x)` shown
+  grayscale, or a *z-stack* `(acq_t, c, z, y, x)` composited across channels, with
+  auto-contrast on first display. The `acq_t` timepoint is shared across modes.
+- **Live following** — while a run is in progress, coverage and per-FOV status
+  update in place and the displayed FOV re-reads newly-written planes without a
+  widget rebuild.
 
-## Design docs
+## Install
+
+Requires Python ≥ 3.11.
+
+```bash
+pip install -e .
+```
+
+## Run
+
+```bash
+python -m record_zstack_viewer /path/to/experiment
+```
+
+The path is the experiment root (the directory holding `recording/` and/or
+`zarr/`); it defaults to the current directory. The window follows a growing
+acquisition automatically (a ~1 s UI-thread poll/tick).
+
+## CPU / headless note
+
+Rendering goes through a single **ndv/OpenGL** path (there is no separate CPU
+renderer). A CPU-only workstation is fine — its integrated-GPU OpenGL runs the
+viewer without any special setup. Only a **truly GL-less host** (a headless
+server, some VMs, or OpenGL-over-RDP) needs a software GL stack; there, force Mesa
+llvmpipe:
+
+```bash
+LIBGL_ALWAYS_SOFTWARE=1 python -m record_zstack_viewer /path/to/experiment
+```
+
+## Degrades gracefully without the optional sidecars
+
+The viewer targets current squid output but treats three additive sidecars as
+optional, with a fallback for each (see `CONTRACT.md`):
+
+- **FOV positions** — uses the per-store OME `translation` (or a `coordinates.csv`
+  export) when present; **absent**, it reconstructs the FOV grid from the
+  `acquisition.yaml` `wellplate_scan` geometry (and shows an unpositioned FOV list
+  when even that is missing).
+- **`events.jsonl` live status** — tails it as the primary live channel when
+  present; **absent**, it falls back to a cheap file-watch + on-disk poll.
+- **`thumbnails/`** — prefers squid's precomputed PNGs; **absent**, it computes a
+  thumbnail from one decoded plane on demand.
+
+Partially-written stores are read safely: an unwritten chunk reads as its
+`fill_value` and re-reads real pixels once the acquisition writes it.
+
+## How it works
+
+- **Reads go through TensorStore only** (`driver: "zarr3"`) — never a whole-array
+  read. A display request costs exactly the visible plane(s).
+- **Memory is O(1) in dataset size.** Decoded pixels are bounded by a single shared
+  TensorStore `cache_pool` (default ~192 MB), plus a small store-handle LRU and a
+  bounded thumbnail cache. Computed thumbnails are written under
+  `platformdirs.user_cache_dir`, never into the experiment folder.
+- **Qt via `qtpy`** (resolves to PyQt5, matching squid); `pyqtgraph` for widgets;
+  `ndv`/`vispy` for the GPU render surface; `cmap`, `imageio`, `platformdirs`,
+  `PyYAML` round out the stack.
+
+## Documentation
+
 - Design spec: [`docs/specs/2026-07-05-record-zstack-viewer-design.md`](docs/specs/2026-07-05-record-zstack-viewer-design.md)
 - Implementation plan (contract-first, TDD): [`docs/plans/2026-07-06-record-zstack-viewer.md`](docs/plans/2026-07-06-record-zstack-viewer.md)
+- Versioned data contract (stable layout + optional sidecars + fallbacks): [`CONTRACT.md`](CONTRACT.md)
 
-## Approach (summary)
-- **Stack:** Python 3.11 · TensorStore (Zarr v3 reads) · ndv/vispy (GPU render, single path) · qtpy/PyQt5 + pyqtgraph (UI).
-- **Memory:** O(1) in dataset size — per-plane / per-tile reads bounded by a shared TensorStore `cache_pool`; no whole-array loads.
-- **Live:** tails an `events.jsonl` when present, else file-watch + poll; reads partially-written stores safely.
-- **Contract-first:** a versioned `CONTRACT.md` plus a fixture generator and validator come first (Phase 0); the viewer is built and tested entirely against fixtures, decoupling it from the squid-side additions.
+## Development
 
-## Related (acquisition-side, squid repo)
-Three additive sidecars the viewer will adopt are tracked in `AI-docs/Squid/to-do/`:
-per-FOV `coordinates.csv`, `events.jsonl` live status, and per-FOV thumbnails. The viewer
-works without them (fallbacks) and gets cheaper/mm-exact when they land.
+The test suite runs headless (Qt/ndv need an offscreen platform plugin):
+
+```bash
+pip install -e ".[test]"
+QT_QPA_PLATFORM=offscreen python -m pytest tests/
+```
