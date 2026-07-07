@@ -17,6 +17,7 @@ import pytest
 from record_zstack_viewer.cache.memory import default_context
 from record_zstack_viewer.reader.adapter import FovDatasets, open_fov
 from record_zstack_viewer.reader.metadata import FovMetadata
+from record_zstack_viewer.ui import fov_viewer
 from record_zstack_viewer.ui.fov_viewer import (
     FovSourceDataWrapper, FovViewer, _auto_clims)
 
@@ -120,32 +121,77 @@ def test_isel_reads_single_planes_only():
     assert len(src.calls) == 2                          # one read per channel — no more
 
 
-def test_isel_plane_budget_guard_raises_on_wide_requests(ds):
-    """Partial/empty indexes must RAISE, not bulk-read (O(1)-memory constraint).
-
-    An empty index would full-slice every non-spatial axis (16 planes on the
-    tiny zstack); only the composite channel axis may be wide.
+def test_isel_allows_bounded_multi_axis_zstack_request(ds):
+    """Regression (blank z-stack on a real GL canvas): ndv can legitimately ask
+    for BOTH the channel axis AND z wide in ONE bounded request — the observed
+    offender was {acq_t: 0:1, c: all, z: all, y: all, x: all} (6 planes,
+    ~52 MB on the real dataset). The old axis-rule guard rejected it and the
+    image never painted; it must return data with the full c AND z extents.
     """
     w = FovSourceDataWrapper(ds.zstack)
-    with pytest.raises(ValueError, match=r"acq_t.*width > 1"):
-        w.isel({})                       # would be 2*2*4 = 16 plane reads
-    with pytest.raises(ValueError, match=r"'z'"):
-        w.isel({"acq_t": 0})             # c may be wide; z (width 4) may not
-    # the legitimate ndv shapes still succeed: a single plane...
+    out = w.isel({"acq_t": slice(0, 1), "c": slice(None), "z": slice(None),
+                  "y": slice(None), "x": slice(None)})
+    assert out.shape == (1, 2, 4, 64, 64)        # full c and z extents, y/x intact
+    for c in range(2):                           # pixels really are per-(c, z) planes
+        for z in range(4):
+            np.testing.assert_array_equal(
+                out[0, c, z], ds.zstack.read_plane({"acq_t": 0, "c": c, "z": z}))
+
+
+def test_isel_byte_budget_refuses_unbounded_read_before_reading():
+    """OOM guard: isel({}) on a huge recording-sized source (~47 GB if
+    materialized) raises ValueError naming the would-be size and the budget —
+    BEFORE any read_plane call — while a bounded c×z request on the very same
+    source still passes.
+    """
+    src = FakeFovSource(shape=(10_000, 3, 3, 512, 512))   # uint16
+    w = FovSourceDataWrapper(src)
+    full_bytes = 10_000 * 3 * 3 * 512 * 512 * 2           # 47,185,920,000
+    with pytest.raises(ValueError, match="budget") as ei:
+        w.isel({})                                        # unbounded whole-array read
+    assert f"{full_bytes:,}" in str(ei.value)             # names the materialized size
+    assert f"{fov_viewer.MAX_ISEL_BYTES:,}" in str(ei.value)  # names the budget
+    assert src.calls == []                                # raised BEFORE reading
+    out = w.isel({"acq_t": slice(0, 1), "c": slice(None), "z": slice(None),
+                  "y": slice(None), "x": slice(None)})    # bounded: ~4.5 MB
+    assert out.shape == (1, 3, 3, 512, 512)
+    assert len(src.calls) == 9                            # one read per (c, z) plane
+
+
+def test_isel_plane_budget_guard_enforces_byte_budget(ds, monkeypatch):
+    """The guard is a BYTE budget (OOM prevention), not an axis rule.
+
+    On the default budget every bounded request passes — even the tiny
+    fixture's whole array (~256 KB). With MAX_ISEL_BYTES lowered to one plane,
+    anything wider raises (naming the size) before any read happens.
+    """
+    w = FovSourceDataWrapper(ds.zstack)
+    # bounded requests pass on the default budget: a single plane...
     assert w.isel({"acq_t": 0, "c": 0, "z": 0}).shape == (64, 64)
-    # ...and the composite request (channel axis wide, all others width-1)
+    # ...the composite request (channel axis wide, others width-1)...
     out = w.isel({0: slice(0, 1), 1: slice(None), 2: slice(1, 2),
                   3: slice(None), 4: slice(None)})
     assert out.shape == (1, 2, 1, 64, 64)
-    # recording layout has no channel axis at all -> nothing may be wide
+    # ...and even the full array of a SMALL source (it fits the budget)
+    assert w.isel({}).shape == (2, 2, 4, 64, 64)
+    # lower the budget to exactly one 64x64 uint16 plane (8,192 bytes)
+    plane_bytes = 64 * 64 * 2
+    monkeypatch.setattr(fov_viewer, "MAX_ISEL_BYTES", plane_bytes)
+    assert w.isel({"acq_t": 0, "c": 0, "z": 0}).shape == (64, 64)   # still passes
+    with pytest.raises(ValueError, match="budget"):
+        w.isel({0: slice(0, 1), 1: slice(None), 2: slice(1, 2),
+                3: slice(None), 4: slice(None)})    # 2 planes -> 16,384 B, over
+    with pytest.raises(ValueError, match=f"{plane_bytes * 2:,}"):
+        w.isel({"acq_t": 0, "z": 0})                # c full-sliced -> 2 planes
     wr = FovSourceDataWrapper(ds.recording)
-    with pytest.raises(ValueError, match=r"frame"):
-        wr.isel({})
+    with pytest.raises(ValueError, match="budget"):
+        wr.isel({})                                 # 30 planes, way over
     assert wr.isel({"acq_t": 0, "frame": 0, "z": 0}).shape == (64, 64)
     # the guard fires BEFORE any read: zero read_plane calls on the fake
-    src = FakeFovSource()
+    src = FakeFovSource()                           # (2, 2, 4, 8, 8) uint16
+    monkeypatch.setattr(fov_viewer, "MAX_ISEL_BYTES", 4 * 8 * 8 * 2 - 1)
     with pytest.raises(ValueError):
-        FovSourceDataWrapper(src).isel({})
+        FovSourceDataWrapper(src).isel({"acq_t": 0, "c": 0})  # z wide: 4 planes
     assert src.calls == []
 
 

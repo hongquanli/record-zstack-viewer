@@ -8,11 +8,14 @@ Two pieces, and the ONLY module that imports ndv (Global Constraints):
   ±ints — normalized via the base's `normalize_axis_key` — and values are ints
   or slices, with slice-valued axes kept as singleton dims because ndv
   transposes/squeezes afterwards). Every requested non-spatial combination is
-  materialized with ONE `source.read_plane` call, so a display request costs
-  exactly the visible plane (or the C visible channel planes in composite
-  mode) — never a whole-array read. A raising plane-budget guard makes that
-  structural: any wider request (e.g. a partial index that would full-slice
-  the remaining non-spatial axes) errors instead of bulk-reading.
+  materialized with ONE `source.read_plane` call, and requests only cost what
+  they select — never a whole-array read on a big source. A raising byte-budget
+  guard (`MAX_ISEL_BYTES`) makes that structural: a request that would
+  materialize more than the budget (e.g. `isel({})` full-slicing every axis of
+  a 10,000-frame recording) errors instead of bulk-reading, while any BOUNDED
+  request passes — on a real GL canvas ndv legitimately asks for the channel
+  AND z axes wide in one composite z-stack request, which an earlier per-axis
+  rule wrongly refused (blank canvas).
 
 - `FovViewer` embeds ONE `ndv.ArrayViewer` and presents the two dataset modes:
   a multi-plane *recording* `(acq_t, frame, z, y, x)` shown grayscale (frame is
@@ -46,7 +49,10 @@ if TYPE_CHECKING:
 _AUTO_PERCENTILES = (1.0, 99.9)  # Global Constraints: auto-contrast percentiles
 _MODES = ("recording", "zstack")
 _SPATIAL = 2  # trailing (y, x) axes of every FovSource
-_MAX_COMPOSITE_CHANNELS = 16  # isel plane budget: widest allowed 'c' axis request
+# isel OOM guard: the most bytes one isel() call may materialize. Generous for
+# any bounded ndv display request (a multi-channel c×z composite is tens of MB)
+# yet far below an accidental whole-array read of a long recording (tens of GB).
+MAX_ISEL_BYTES = 256 * 1024 * 1024  # 256 MB
 
 
 class FovSourceDataWrapper(DataWrapper):
@@ -54,10 +60,12 @@ class FovSourceDataWrapper(DataWrapper):
 
     `dims`/`coords` expose the source's NAMED axes (so ndv's sliders and index
     maps are keyed by `acq_t`/`frame`/`c`/`z`), and `isel` maps each requested
-    non-spatial combination to one `read_plane` call. ndv itself only ever asks
-    for the stepped axes as width-1 slices plus full slices for the visible
-    (y, x) axes — and the channel axis in composite mode — so requests stay
-    plane-sized regardless of dataset size (Global Constraints).
+    non-spatial combination to one `read_plane` call. ndv's display requests
+    are always BOUNDED — width-1 slices for stepped axes plus the visible
+    (y, x) axes, and possibly several wide non-spatial axes at once (on a real
+    GL canvas a composite z-stack request spans both `c` and `z`) — so they
+    stay small regardless of dataset size; the `MAX_ISEL_BYTES` guard in `isel`
+    refuses only genuinely unbounded reads (Global Constraints).
     """
 
     PRIORITY = 40  # checked ahead of ndv's builtin wrappers; `supports` is exact
@@ -94,13 +102,14 @@ class FovSourceDataWrapper(DataWrapper):
         `read_plane` per selected non-spatial combination; the (y, x) selection
         is applied to the returned plane.
 
-        A plane-budget guard enforces the O(1)-memory Global Constraint
-        structurally: among the non-spatial axes only the composite channel
-        axis ('c', capped at `_MAX_COMPOSITE_CHANNELS`) may span width > 1.
-        Anything wider — e.g. a partial index whose unspecified axes would be
-        full-sliced — raises ValueError instead of materializing the array
-        (raising, not truncating: a narrowed result would silently break
-        ndv's shape contract).
+        A byte-budget guard enforces the bounded-memory Global Constraint:
+        if the selected widths (over ALL axes) would materialize more than
+        `MAX_ISEL_BYTES`, raise ValueError BEFORE reading anything — that size
+        only arises from an effectively whole-array read (e.g. `isel({})` on a
+        long recording), never from an ndv display request. Any bounded
+        request passes, including composite z-stack requests that span both
+        the `c` and `z` axes (raising, not truncating: a narrowed result
+        would silently break ndv's shape contract).
         """
         shape, dims = self._data.shape, self._data.dims
         sel: list[int | slice] = [slice(None)] * len(shape)
@@ -122,24 +131,22 @@ class FovSourceDataWrapper(DataWrapper):
                 picks.append(range(i, i + 1))
                 kept.append(False)
 
-        channel_ax = dims[:ns].index("c") if "c" in dims[:ns] else None
-        offending = [
-            dims[ax] for ax in range(ns) if len(picks[ax]) > 1
-            and not (ax == channel_ax and len(picks[ax]) <= _MAX_COMPOSITE_CHANNELS)]
-        if offending:
-            raise ValueError(
-                f"isel index {dict(index)!r} exceeds the plane budget: "
-                f"non-spatial axes {offending} span width > 1, but only the "
-                f"composite channel axis 'c' may (up to "
-                f"{_MAX_COMPOSITE_CHANNELS}). Refusing to materialize "
-                f"{math.prod(len(r) for r in picks)} planes — ndv requests "
-                "width-1 slices plus at most the channel axis; anything wider "
-                "is a whole-array read.")
-
         yx = tuple(sel[ns:])
+        spatial_widths = [
+            len(range(*v.indices(shape[ns + j]))) if isinstance(v, slice) else 1
+            for j, v in enumerate(yx)]
+        n_planes = math.prod(len(r) for r in picks)
+        n_bytes = n_planes * math.prod(spatial_widths) * self.dtype.itemsize
+        if n_bytes > MAX_ISEL_BYTES:
+            raise ValueError(
+                f"isel index {dict(index)!r} exceeds the plane budget: it "
+                f"would materialize {n_bytes:,} bytes ({n_planes} planes), "
+                f"over MAX_ISEL_BYTES = {MAX_ISEL_BYTES:,}. Refusing what is "
+                "effectively a whole-array read — ndv display requests are "
+                "bounded and stay far under the budget.")
+
         spatial_shape = tuple(
-            len(range(*v.indices(shape[ns + j]))) for j, v in enumerate(yx)
-            if isinstance(v, slice))
+            w for j, w in enumerate(spatial_widths) if isinstance(yx[j], slice))
         out_shape = tuple(len(picks[ax]) for ax in range(ns) if kept[ax]) + spatial_shape
         out = np.empty(out_shape, dtype=self.dtype)
         for pos in itertools.product(*(range(len(r)) for r in picks)):
