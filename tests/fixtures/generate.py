@@ -1,5 +1,5 @@
 from pathlib import Path
-import json, numpy as np, tensorstore as ts
+import json, os, re, numpy as np, tensorstore as ts
 
 
 def _open_create(path: Path, shape, chunk, dtype="uint16"):
@@ -172,3 +172,103 @@ def _write_png(path: Path, arr8):
         iio.imwrite(path, (arr8 / 256).astype("uint8"))
     except Exception:
         np.save(path.with_suffix(".npy"), arr8)
+
+
+# --- incremental growth (Task 6.2) -------------------------------------------
+# Drive a partial experiment forward on disk, one pending plane per store per
+# call, the way a live acquisition fills its pre-declared stores over time.
+
+_GROW_FOV_RE = re.compile(r"^fov_(\d+)(?:_z\d+)?\.ome\.zarr$")
+
+
+def _digit_dirs(d: Path) -> set:
+    """The digit-named children of a zarr3 `c/` chunk dir (its chunk indices)."""
+    try:
+        return {int(p.name) for p in d.iterdir() if p.name.isdigit()}
+    except (FileNotFoundError, NotADirectoryError):
+        return set()
+
+
+def _store_complete(store: Path) -> bool:
+    """True once `store`'s `_squid.acquisition_complete` is set (finalized)."""
+    try:
+        meta = json.loads((store / "zarr.json").read_text())
+    except (OSError, ValueError):
+        return False
+    return bool(((meta.get("attributes") or {}).get("_squid") or {}).get("acquisition_complete"))
+
+
+def _finalize_atomic(store: Path, **squid_updates) -> None:
+    """Merge `squid_updates` into `store/zarr.json`'s `_squid`, written atomically
+    (temp file + os.replace) so a reader never observes a torn zarr.json."""
+    zj = store / "zarr.json"
+    meta = json.loads(zj.read_text())
+    meta.setdefault("attributes", {}).setdefault("_squid", {}).update(squid_updates)
+    tmp = zj.parent / (zj.name + ".tmp")
+    tmp.write_text(json.dumps(meta, indent=2))
+    os.replace(tmp, zj)                                  # atomic swap within the dir
+
+
+def grow_experiment(root, step):
+    """Advance a partially-written experiment on disk by one growth `step`.
+
+    Emulates one increment of a live acquisition: for every not-yet-finalized
+    store under `root`, write its next single pending plane — one recording
+    frame (T axis) and, per channel, one z-plane of the z-stack at the current
+    (t0) timepoint — filled with a distinct non-zero value ``1000 * (step + 1)``
+    so a viewer can tell a freshly-written plane from an unwritten fill (0). A
+    store that thereby reaches its full declared extent is finalized
+    (``_squid.acquisition_complete = True``; recording also bumps
+    ``captured_frames``). Chunk writes are atomic (tensorstore) and the
+    ``zarr.json`` finalize is an atomic replace. Growth is one plane per store
+    per call, so a caller can drive ``LiveEngine.tick()`` between calls and watch
+    coverage rise and pixels appear. Returns the set of ``(well, fov)`` whose
+    stores were touched (grown or finalized) this step."""
+    root = Path(root)
+    value = 1000 * (int(step) + 1)
+    touched: set = set()
+
+    # -- recording: recording/t{t}/{well}/fov_{k}[_z{j}].ome.zarr (array at root) --
+    rec = root / "recording"
+    if rec.is_dir():
+        for store in sorted(rec.glob("t*/*/fov_*.ome.zarr")):
+            m = _GROW_FOV_RE.match(store.name)
+            if not (m and store.is_dir()) or _store_complete(store):
+                continue
+            arr = ts.open({"driver": "zarr3",
+                           "kvstore": {"driver": "file", "path": str(store)}}).result()
+            total, (h, w) = arr.shape[0], arr.shape[-2:]
+            written = _digit_dirs(store / "c")
+            nxt = next((f for f in range(total) if f not in written), None)
+            if nxt is not None:
+                arr[nxt, 0, 0].write(np.full((h, w), value, dtype="uint16")).result()
+                written.add(nxt)
+            _finalize_atomic(store, acquisition_complete=len(written) >= total,
+                             captured_frames=len(written))
+            touched.add((store.parent.name, int(m.group(1))))
+
+    # -- z-stack: zarr/{well}/fov_{k}.ome.zarr (array at /0, one z per channel) --
+    zroot = root / "zarr"
+    if zroot.is_dir():
+        for grp in sorted(zroot.glob("*/fov_*.ome.zarr")):
+            m = _GROW_FOV_RE.match(grp.name)
+            if not (m and grp.is_dir()) or _store_complete(grp):
+                continue
+            arrp = grp / "0"
+            a = ts.open({"driver": "zarr3",
+                         "kvstore": {"driver": "file", "path": str(arrp)}}).result()
+            _nt, nc, nz, h, w = a.shape
+            t = 0                                        # partial fixtures are single-t
+            complete = True
+            for c in range(nc):
+                written = _digit_dirs(arrp / "c" / str(t) / str(c))
+                nxt = next((z for z in range(nz) if z not in written), None)
+                if nxt is not None:
+                    a[t, c, nxt].write(np.full((h, w), value, dtype="uint16")).result()
+                    written.add(nxt)
+                complete = complete and len(written) >= nz
+            if complete:
+                _finalize_atomic(grp, acquisition_complete=True)
+            touched.add((grp.parent.name, int(m.group(1))))
+
+    return touched
