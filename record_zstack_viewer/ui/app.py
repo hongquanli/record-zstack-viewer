@@ -53,16 +53,19 @@ class MainWindow(QMainWindow):
     live engine is `._live`, driven only by the UI-thread `._live_timer`.
     """
 
-    def __init__(self, root: str | Path, parent: QWidget | None = None) -> None:
+    def __init__(self, root: str | Path, parent: QWidget | None = None,
+                 *, context=None, controller=None) -> None:
         super().__init__(parent)
         self.root = Path(root)
+        self._controller = controller
         self.setWindowTitle(f"record-zstack viewer — {self.root.name}")
         self.resize(1280, 800)
 
         # ONE shared context + ONE thumbnail cache (single bounded cache_pool):
         # the model's opens, the navigator's thumbnails, and every thumbnail
-        # compute all draw from these same instances.
-        self._context = default_context()
+        # compute all draw from these same instances. An injected context (from
+        # the ViewerController) is used as-is so ALL windows share one cache_pool.
+        self._context = context if context is not None else default_context()
         self._thumbnails = ThumbnailCache(self.root, context=self._context)
         self._model = ExperimentModel(self.root, self._context)
 
