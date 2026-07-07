@@ -49,7 +49,7 @@ def test_no_cache_written_into_experiment_folder(tiny_experiment_poor, _isolated
 
 
 def test_disk_cache_reused_across_instances(tiny_experiment_poor, _isolated_cache, monkeypatch):
-    from record_zstack_viewer.cache import thumbnails as thumbs_mod
+    from record_zstack_viewer.reader import adapter as adapter_mod
     from record_zstack_viewer.cache.thumbnails import ThumbnailCache
     first = ThumbnailCache(tiny_experiment_poor).get("A1", 0)   # computes + persists
     assert list(_isolated_cache.rglob("*.png"))
@@ -57,7 +57,9 @@ def test_disk_cache_reused_across_instances(tiny_experiment_poor, _isolated_cach
     def _boom(*a, **k):
         raise AssertionError("must serve from disk cache, not recompute")
 
-    monkeypatch.setattr(thumbs_mod, "open_fov", _boom)          # a fresh instance ...
+    # `_compute` imports `open_fov` from `reader.adapter` lazily, so patch it at the
+    # source: a fresh instance must serve the disk copy and never reach open_fov.
+    monkeypatch.setattr(adapter_mod, "open_fov", _boom)         # a fresh instance ...
     second = ThumbnailCache(tiny_experiment_poor).get("A1", 0)  # ... reads the disk copy
     np.testing.assert_array_equal(first, second)
 
@@ -74,3 +76,58 @@ def test_ram_lru_is_bounded(tiny_experiment_poor):
     for k in range(4):                              # poor fixture has 6 fovs in A1
         tc.get("A1", k)
     assert len(tc._ram) <= 2                        # LRU keeps the RAM cache bounded
+
+
+def test_thumbnailcache_importable_from_package_no_cycle():
+    """Regression guard for the cache<->reader import cycle.
+
+    `cache/__init__` re-exports `ThumbnailCache` and `reader.adapter` imports
+    `cache.memory`; a top-level `open_fov` import in `thumbnails` re-forms a cycle
+    that fails when `reader.adapter` is imported first (the normal app path). A warm
+    in-process import would hide it, so import that order in a FRESH interpreter and
+    require it to succeed.
+    """
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[1]
+    code = ("import record_zstack_viewer.reader.adapter\n"
+            "from record_zstack_viewer.cache import ThumbnailCache\n"
+            "print(ThumbnailCache.__name__)\n")
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True, text=True,
+        cwd=str(repo_root),
+        env={**os.environ, "PYTHONPATH": str(repo_root)},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "ThumbnailCache" in result.stdout
+
+
+def test_passed_context_is_used(tiny_experiment_poor, monkeypatch):
+    """A context passed to ThumbnailCache is threaded into the compute (so a caller
+    can share the app's single bounded cache_pool), and no fresh default_context is
+    created when one is supplied."""
+    from record_zstack_viewer.reader import adapter as adapter_mod
+    from record_zstack_viewer.cache import thumbnails as thumbs_mod
+    from record_zstack_viewer.cache.memory import default_context
+    from record_zstack_viewer.cache.thumbnails import ThumbnailCache
+
+    shared = default_context()
+    seen = {}
+    real_open_fov = adapter_mod.open_fov
+
+    def _spy(root, well, fov, context):
+        seen["context"] = context
+        return real_open_fov(root, well, fov, context)
+
+    def _no_default(*a, **k):
+        raise AssertionError("must reuse the passed context, not create a default one")
+
+    monkeypatch.setattr(adapter_mod, "open_fov", _spy)
+    monkeypatch.setattr(thumbs_mod, "default_context", _no_default)
+
+    ThumbnailCache(tiny_experiment_poor, context=shared).get("A1", 0)
+    assert seen["context"] is shared               # the exact object we passed, not a new pool

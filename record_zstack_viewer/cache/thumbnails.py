@@ -33,14 +33,16 @@ import hashlib
 import os
 from collections import OrderedDict
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import platformdirs
 import tensorstore as ts
 
 from record_zstack_viewer.cache.memory import default_context
-from record_zstack_viewer.reader.adapter import open_fov
-from record_zstack_viewer.reader.fov_source import FovSource
+
+if TYPE_CHECKING:                     # type-only; avoids a cache<->reader import cycle
+    from record_zstack_viewer.reader.fov_source import FovSource
 
 _APP_NAME = "record-zstack-viewer"
 _TARGET_PX = 192          # ~128-256 px target for the thumbnail's long edge
@@ -148,12 +150,16 @@ class ThumbnailCache:
     on-disk thumbnail across sessions.
     """
 
-    def __init__(self, experiment_root: str | Path, ram_items: int = _DEFAULT_RAM_ITEMS):
+    def __init__(self, experiment_root: str | Path, ram_items: int = _DEFAULT_RAM_ITEMS,
+                 context: ts.Context | None = None):
         self._root = Path(experiment_root)
         self._ram_items = int(ram_items)
         # insertion-ordered (well, fov) -> thumbnail; front = least-recently-used.
         self._ram: "OrderedDict[tuple[str, int], np.ndarray]" = OrderedDict()
-        self._context: ts.Context | None = None   # lazily created on the first compute
+        # Shared TensorStore context whose cache_pool bounds decode memory. When a
+        # caller passes the app's context, computes draw from that single pool instead
+        # of a second 192 MB one; None -> a bounded default is made on first compute.
+        self._context: ts.Context | None = context
 
     def get(self, well: str, fov: int) -> np.ndarray:
         """The ~128-256 px, 2-D uint8 thumbnail for `(well, fov)`.
@@ -188,6 +194,10 @@ class ThumbnailCache:
         return thumb
 
     def _compute(self, well: str, fov: int) -> np.ndarray:
+        # Lazy import: keeps `cache.thumbnails` from importing `reader.adapter` at
+        # module load, which would form a cache<->reader import cycle (adapter imports
+        # `cache.memory`). Deferred to first compute, the modules stay decoupled.
+        from record_zstack_viewer.reader.adapter import open_fov
         if self._context is None:                  # one bounded cache_pool for all computes
             self._context = default_context()
         datasets = open_fov(self._root, well, fov, self._context)
