@@ -1,3 +1,8 @@
+import os
+
+# Phase 5 (UI): headless CI — must be set before any Qt/ndv import.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 import pytest
 from tests.fixtures.generate import generate_experiment
 
