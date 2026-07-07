@@ -10,7 +10,9 @@ Two pieces, and the ONLY module that imports ndv (Global Constraints):
   transposes/squeezes afterwards). Every requested non-spatial combination is
   materialized with ONE `source.read_plane` call, so a display request costs
   exactly the visible plane (or the C visible channel planes in composite
-  mode) — never a whole-array read.
+  mode) — never a whole-array read. A raising plane-budget guard makes that
+  structural: any wider request (e.g. a partial index that would full-slice
+  the remaining non-spatial axes) errors instead of bulk-reading.
 
 - `FovViewer` embeds ONE `ndv.ArrayViewer` and presents the two dataset modes:
   a multi-plane *recording* `(acq_t, frame, z, y, x)` shown grayscale (frame is
@@ -26,13 +28,13 @@ Two pieces, and the ONLY module that imports ndv (Global Constraints):
 from __future__ import annotations
 
 import itertools
+import math
 from typing import TYPE_CHECKING, Any, Hashable, Mapping, Sequence
 
 import numpy as np
 from cmap import Colormap
-from ndv import ArrayViewer
+from ndv import ArrayViewer, DataWrapper
 from ndv.models import ArrayDisplayModel, ClimsManual, LUTModel
-from ndv.models._data_wrapper import DataWrapper
 from qtpy.QtWidgets import QVBoxLayout, QWidget
 
 from record_zstack_viewer.reader.fov_source import FovSource
@@ -44,6 +46,7 @@ if TYPE_CHECKING:
 _AUTO_PERCENTILES = (1.0, 99.9)  # Global Constraints: auto-contrast percentiles
 _MODES = ("recording", "zstack")
 _SPATIAL = 2  # trailing (y, x) axes of every FovSource
+_MAX_COMPOSITE_CHANNELS = 16  # isel plane budget: widest allowed 'c' axis request
 
 
 class FovSourceDataWrapper(DataWrapper):
@@ -90,6 +93,14 @@ class FovSourceDataWrapper(DataWrapper):
         ndv sends width-1 slices for stepped axes and squeezes later). One
         `read_plane` per selected non-spatial combination; the (y, x) selection
         is applied to the returned plane.
+
+        A plane-budget guard enforces the O(1)-memory Global Constraint
+        structurally: among the non-spatial axes only the composite channel
+        axis ('c', capped at `_MAX_COMPOSITE_CHANNELS`) may span width > 1.
+        Anything wider — e.g. a partial index whose unspecified axes would be
+        full-sliced — raises ValueError instead of materializing the array
+        (raising, not truncating: a narrowed result would silently break
+        ndv's shape contract).
         """
         shape, dims = self._data.shape, self._data.dims
         sel: list[int | slice] = [slice(None)] * len(shape)
@@ -110,6 +121,20 @@ class FovSourceDataWrapper(DataWrapper):
                     i += shape[ax]
                 picks.append(range(i, i + 1))
                 kept.append(False)
+
+        channel_ax = dims[:ns].index("c") if "c" in dims[:ns] else None
+        offending = [
+            dims[ax] for ax in range(ns) if len(picks[ax]) > 1
+            and not (ax == channel_ax and len(picks[ax]) <= _MAX_COMPOSITE_CHANNELS)]
+        if offending:
+            raise ValueError(
+                f"isel index {dict(index)!r} exceeds the plane budget: "
+                f"non-spatial axes {offending} span width > 1, but only the "
+                f"composite channel axis 'c' may (up to "
+                f"{_MAX_COMPOSITE_CHANNELS}). Refusing to materialize "
+                f"{math.prod(len(r) for r in picks)} planes — ndv requests "
+                "width-1 slices plus at most the channel axis; anything wider "
+                "is a whole-array read.")
 
         yx = tuple(sel[ns:])
         spatial_shape = tuple(

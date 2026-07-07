@@ -128,7 +128,11 @@ def generate_experiment(root, *, wells, fovs_per_well, nt, recording_frames,
                                    "kvstore": {"driver": "file", "path": str(arrp)}}).result())
                 for c in range(nc):
                     for z in range(zstack_nz if not partial else 1):
-                        a[t, c, z].write(_synthetic(h, w, seed=9+t+c*3+z)).result()
+                        # mixed-radix seed: distinct multipliers per coordinate so
+                        # different (well, fov, t, c, z) yield different pixels —
+                        # no cross-well/fov duplicates or diagonal (t,c,z) collisions
+                        seed = 9 + wi*1_000_000 + k*100_000 + t*10_000 + c*100 + z
+                        a[t, c, z].write(_synthetic(h, w, seed=seed)).result()
                 grp.mkdir(parents=True, exist_ok=True)
                 zsquid = {"structure": "5D-TCZYX", "pixel_size_um": 0.5,
                           "z_step_um": 1.0, "time_increment_s": 60.0,

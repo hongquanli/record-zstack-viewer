@@ -120,6 +120,35 @@ def test_isel_reads_single_planes_only():
     assert len(src.calls) == 2                          # one read per channel — no more
 
 
+def test_isel_plane_budget_guard_raises_on_wide_requests(ds):
+    """Partial/empty indexes must RAISE, not bulk-read (O(1)-memory constraint).
+
+    An empty index would full-slice every non-spatial axis (16 planes on the
+    tiny zstack); only the composite channel axis may be wide.
+    """
+    w = FovSourceDataWrapper(ds.zstack)
+    with pytest.raises(ValueError, match=r"acq_t.*width > 1"):
+        w.isel({})                       # would be 2*2*4 = 16 plane reads
+    with pytest.raises(ValueError, match=r"'z'"):
+        w.isel({"acq_t": 0})             # c may be wide; z (width 4) may not
+    # the legitimate ndv shapes still succeed: a single plane...
+    assert w.isel({"acq_t": 0, "c": 0, "z": 0}).shape == (64, 64)
+    # ...and the composite request (channel axis wide, all others width-1)
+    out = w.isel({0: slice(0, 1), 1: slice(None), 2: slice(1, 2),
+                  3: slice(None), 4: slice(None)})
+    assert out.shape == (1, 2, 1, 64, 64)
+    # recording layout has no channel axis at all -> nothing may be wide
+    wr = FovSourceDataWrapper(ds.recording)
+    with pytest.raises(ValueError, match=r"frame"):
+        wr.isel({})
+    assert wr.isel({"acq_t": 0, "frame": 0, "z": 0}).shape == (64, 64)
+    # the guard fires BEFORE any read: zero read_plane calls on the fake
+    src = FakeFovSource()
+    with pytest.raises(ValueError):
+        FovSourceDataWrapper(src).isel({})
+    assert src.calls == []
+
+
 def test_supports_and_create(ds):
     from ndv.models._data_wrapper import DataWrapper
     assert FovSourceDataWrapper.supports(ds.zstack)
