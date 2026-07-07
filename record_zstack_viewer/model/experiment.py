@@ -165,16 +165,29 @@ class ExperimentModel:
         an already-built recording source re-fetches its handle lazily and thus sees
         the growth too. Node-building itself reads `zarr.json` directly (never through
         the handle cache), so this stays idempotent for a static experiment.
+
+        The rebuilt state is assembled entirely into locals and only then published
+        to ``self._*`` in single-statement assignments, so a concurrent reader (or one
+        re-entering via a callback) always sees either the wholly-old or the wholly-new
+        snapshot — never a half-rebuilt tree, and never a dict mutated mid-iteration
+        (which would raise ``RuntimeError: dictionary changed size during iteration``).
         """
         self._handles.clear()
-        self._acq = self._load_acquisition()
-        self._coords = self._load_coordinates()
-        self._expected = self._load_expected_fovs()
-        self._stores = self._walk_tree()
+        acq = self._load_acquisition()
+        coords = self._load_coordinates()
+        expected = self._load_expected_fovs()
+        stores = self._walk_tree()
         done = (self.root / ".done").exists()
-        self._nodes = {}
-        for well in self._stores:
-            self._nodes[well] = self._build_well_nodes(well, done)
+        nodes: dict[str, list[FovNode]] = {}
+        for well in stores:
+            nodes[well] = self._build_well_nodes(well, stores[well], done, acq, coords)
+        # Publish atomically: single-statement rebinds only after everything above is
+        # built, so no reader ever observes a partially-swapped snapshot.
+        self._acq = acq
+        self._coords = coords
+        self._expected = expected
+        self._stores = stores
+        self._nodes = nodes
 
     # --- sidecar loading -----------------------------------------------------
 
@@ -185,10 +198,13 @@ class ExperimentModel:
         except (OSError, ValueError):
             return {}
 
-    def _regions(self) -> dict[str, dict]:
+    def _regions(self, acq: dict | None = None) -> dict[str, dict]:
         """`{region_name: region_dict}` from `wellplate_scan.regions` (empty when
-        there is no `wellplate_scan` block — a Current-Position run)."""
-        scan = self._acq.get("wellplate_scan") or {}
+        there is no `wellplate_scan` block — a Current-Position run).
+
+        Reads `self._acq` by default; `refresh()` passes the freshly-loaded `acq` so
+        node-building never reads `self` mid-swap."""
+        scan = (self._acq if acq is None else acq).get("wellplate_scan") or {}
         return {str(r.get("name")): r for r in (scan.get("regions") or [])
                 if isinstance(r, dict) and r.get("name") is not None}
 
@@ -284,18 +300,20 @@ class ExperimentModel:
 
     # --- node construction ---------------------------------------------------
 
-    def _build_well_nodes(self, well: str, done: bool) -> list[FovNode]:
-        fov_slots = self._stores[well]
+    def _build_well_nodes(self, well: str, fov_slots: dict[int, _FovStores],
+                          done: bool, acq: dict,
+                          coords: dict[tuple[str, int], tuple[float, float]]
+                          ) -> list[FovNode]:
         # per-FOV representative metadata (translation, complete/aborted flags)
         metas: dict[int, list[FovMetadata]] = {}
         positions: dict[int, tuple[float, float] | None] = {}
         for fov in sorted(fov_slots):
             fs = fov_slots[fov]
             metas[fov] = self._read_metas(fs)
-            positions[fov] = self._position_direct(well, fov, metas[fov])
+            positions[fov] = self._position_direct(well, fov, metas[fov], coords)
 
         # step 3: reconstruct any FOV still lacking a position, per well, from geometry
-        recon = self._reconstruct_well(well, fov_slots, metas,
+        recon = self._reconstruct_well(well, fov_slots, metas, acq,
                                        need_recon=any(positions[k] is None for k in positions))
 
         nodes = []
@@ -354,17 +372,18 @@ class ExperimentModel:
 
     # --- positioning ---------------------------------------------------------
 
-    def _position_direct(self, well: str, fov: int,
-                         metas: list[FovMetadata]) -> tuple[float, float] | None:
+    def _position_direct(self, well: str, fov: int, metas: list[FovMetadata],
+                         coords: dict[tuple[str, int], tuple[float, float]]
+                         ) -> tuple[float, float] | None:
         """Steps 1-2: the OME translation (um -> mm), else `coordinates.csv` (mm)."""
         for m in metas:                                  # step 1: translation
             if m.position_um is not None:
                 x_um, y_um, _z = m.position_um
                 return (x_um / 1000.0, y_um / 1000.0)
-        return self._coords.get((well, fov))             # step 2: coordinates.csv (or None)
+        return coords.get((well, fov))                   # step 2: coordinates.csv (or None)
 
     def _reconstruct_well(self, well: str, fov_slots: dict[int, _FovStores],
-                          metas: dict[int, list[FovMetadata]],
+                          metas: dict[int, list[FovMetadata]], acq: dict,
                           need_recon: bool) -> dict[int, tuple[float, float]]:
         """Step 3: reconstruct `{fov: (x_mm, y_mm)}` from `wellplate_scan` geometry.
 
@@ -373,7 +392,7 @@ class ExperimentModel:
         """
         if not need_recon:
             return {}
-        region = self._regions().get(well)
+        region = self._regions(acq).get(well)
         if not region or not isinstance(region.get("center_mm"), (list, tuple)):
             return {}
         cx, cy = float(region["center_mm"][0]), float(region["center_mm"][1])
@@ -383,7 +402,7 @@ class ExperimentModel:
             return {}
         fov_w, fov_h = fov_wh
 
-        scan = self._acq.get("wellplate_scan") or {}
+        scan = acq.get("wellplate_scan") or {}
         overlap = float(scan.get("overlap_percent", 0.0) or 0.0)
         scan_size = scan.get("scan_size_mm", None)
         scan_xy = _as_xy(scan_size) if scan_size is not None else (fov_w, fov_h)

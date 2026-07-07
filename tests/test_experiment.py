@@ -13,6 +13,8 @@ flat-list (step 4) tests build fixtures with translations STRIPPED — the only 
 to force the model past step 1.
 """
 import json
+import sys
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -96,6 +98,62 @@ def test_refresh_is_idempotent(tiny_experiment):
     m.refresh()
     after = {(n.well, n.fov, n.status, n.xy_mm) for w in m.wells() for n in m.fovs(w)}
     assert before == after
+
+
+def test_refresh_atomic_under_concurrent_readers(tiny_experiment):
+    """`refresh()` swaps state atomically: readers hammering `wells()`/`fovs()` while
+    another thread `refresh()`es must never see a partial/empty tree nor raise.
+
+    The old piecemeal rebuild (`self._nodes = {}` then an in-place fill loop) fails
+    this — a reader catches either an empty/partial `wells()` set or a `RuntimeError:
+    dictionary changed size during iteration` from `sorted(self._nodes)` racing the
+    fill. Mirrors the 4.2a HandleCache concurrency test (barrier + 1e-6 switch
+    interval, restored in `finally`, errors collected and asserted on the main thread).
+    """
+    m = ExperimentModel(tiny_experiment, default_context())
+    valid = {"A1", "B2"}                                 # the only complete well set
+    assert set(m.wells()) == valid
+
+    errors: list[BaseException] = []
+    stop = threading.Event()
+    n_readers = 8
+    start = threading.Barrier(n_readers + 1)             # readers + the one refresher
+
+    def reader() -> None:
+        try:
+            start.wait()                                 # release all threads together
+            while not stop.is_set():
+                got = set(m.wells())
+                assert got == valid, got                 # never empty/partial while data exists
+                for w in got:
+                    m.fovs(w)                            # exercise the dict `.get` path too
+        except BaseException as e:                       # capture; assert on the main thread
+            errors.append(e)
+
+    def refresher() -> None:
+        try:
+            start.wait()
+            for _ in range(500):
+                m.refresh()
+        except BaseException as e:
+            errors.append(e)
+        finally:
+            stop.set()                                   # let readers finish
+
+    # Force near-per-bytecode thread switches so the window between the (old) node-dict
+    # clear and its refill is actually interleaved with a reader.
+    old_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        threads = [threading.Thread(target=reader) for _ in range(n_readers)]
+        threads.append(threading.Thread(target=refresher))
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    finally:
+        sys.setswitchinterval(old_interval)
+    assert not errors, errors[0]
 
 
 # --- refresh() surfaces newly-written data (drops long-lived cached handles) --

@@ -59,3 +59,28 @@ def test_tailer_handles_truncation(tmp_path):
     # file rewritten from scratch — new size is shorter than the tracked offset
     p.write_text('{"type":"run_done"}\n')
     assert [e["type"] for e in t.poll()] == ["run_done"]
+
+
+def test_tailer_reconstitutes_multibyte_char_split_across_polls(tmp_path):
+    """A multi-byte UTF-8 char split across a read boundary must be buffered as raw
+    bytes, never decoded half-way: the poll that sees only the first byte returns []
+    (no newline yet), and the next poll — after the rest of the char and the newline
+    arrive — reconstitutes and decodes the full line."""
+    mu = "µ"                                        # 'µ' — UTF-8 bytes 0xC2 0xB5
+    p = tmp_path / "events.jsonl"
+    t = EventLogTailer(p)
+    p.write_bytes(b'{"type":"note","msg":"' + b"\xc2")   # line up to only the 1st byte of µ
+    assert t.poll() == []                                # split mid-char, no newline yet
+    with p.open("ab") as f:
+        f.write(b"\xb5" + b'"}\n')                        # 2nd byte of µ + close quote + newline
+    assert t.poll() == [{"type": "note", "msg": mu}]      # reconstituted and decoded
+
+
+def test_tailer_skips_invalid_utf8_line(tmp_path):
+    """A complete line of raw invalid-UTF-8 / non-JSON bytes is skipped without
+    raising and without stalling the valid line that follows it."""
+    p = tmp_path / "events.jsonl"
+    p.write_bytes(b"\xff\xff not valid utf-8 or json\n"   # bad bytes, complete line
+                  b'{"type":"run_started"}\n')            # valid line immediately after
+    t = EventLogTailer(p)
+    assert [e["type"] for e in t.poll()] == ["run_started"]
