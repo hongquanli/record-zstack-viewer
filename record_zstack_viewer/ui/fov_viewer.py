@@ -298,6 +298,27 @@ class FovViewer(QWidget):
             old.close()
         self._layout.addWidget(self._viewer.widget())
 
+    def update_extent(self, source: FovSource) -> None:
+        """Data-only live swap: show `source` (a re-opened FOV whose store grew)
+        while KEEPING the current display model.
+
+        The user's slider index and contrast limits survive — unlike
+        `set_datasets`, which installs a fresh model (auto-contrast, reset
+        index). ndv's public ``.data`` setter re-reads the wrapper's dims/coords
+        (so a grown axis extends its slider) and re-requests the current slice,
+        surfacing the new pixels. The dims signature must match the displayed
+        source (same phase); anything else raises so the caller can fall back
+        to a full `set_datasets` rebuild.
+        """
+        if self._viewer is None or self._source is None:
+            raise RuntimeError("set_datasets() before update_extent()")
+        if tuple(source.dims) != tuple(self._source.dims):
+            raise ValueError(
+                f"update_extent needs the displayed dims {tuple(self._source.dims)}, "
+                f"got {tuple(source.dims)}; use set_datasets for a phase change")
+        self._viewer.data = FovSourceDataWrapper(source)  # display model untouched
+        self._source = source
+
     def set_timepoint(self, t: int) -> None:
         """Step the shared `acq_t` axis to `t` (clamped to the source's extent)."""
         if self._viewer is None or self._source is None:
@@ -305,6 +326,14 @@ class FovViewer(QWidget):
         n_t = self._source.shape[0]  # acq_t is axis 0 in both modes
         self._viewer.display_model.current_index.update(
             {"acq_t": max(0, min(int(t), n_t - 1))})
+
+    @property
+    def timepoint(self) -> int:
+        """The current shared `acq_t` index (0 when nothing is displayed)."""
+        if self._viewer is None:
+            return 0
+        t = self._viewer.display_model.current_index.get("acq_t", 0)
+        return int(t) if isinstance(t, int) else 0
 
     def auto_contrast(self) -> None:
         """Recompute the 1–99.9 percentile limits from the current plane(s)."""
