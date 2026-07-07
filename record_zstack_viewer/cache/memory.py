@@ -12,6 +12,7 @@ Verified against tensorstore 0.1.77: `ts.Context({"cache_pool": {...}})` and
 """
 from __future__ import annotations
 
+import threading
 from collections import OrderedDict
 from pathlib import Path
 
@@ -61,6 +62,16 @@ class HandleCache:
     *number* of concurrently-open handles at `max_open`. Opening one more drops the
     least-recently-used handle — a plain reference drop, which is how TensorStore
     releases a handle (there is no explicit close) — so idle handles are freed.
+
+    **Thread-safe.** The `LiveEngine` runs its poll/tick (which drives
+    `ExperimentModel.refresh()` → `clear()`) on a background thread while the UI
+    reads through the same cache, so a `threading.Lock` makes the check-then-act
+    over the `OrderedDict` atomic. Without it, concurrent callers could double-open
+    a path, lose an insert, exceed `max_open`, or raise a `KeyError` from
+    `move_to_end` on a handle another thread just evicted. The lock is held across
+    `open_array` too so two threads racing on the same missing path open it once;
+    opens are fast local-file opens and contention is low (one background tick vs.
+    the UI), so serializing them is a safe, simple choice.
     """
 
     def __init__(self, context: ts.Context, max_open: int = _DEFAULT_MAX_OPEN):
@@ -68,25 +79,41 @@ class HandleCache:
         self._max_open = int(max_open)
         # insertion-ordered path -> handle; front = least-recently-used.
         self._handles: "OrderedDict[str, ts.TensorStore]" = OrderedDict()
+        # guards every read/mutation of `_handles` (see class docstring).
+        self._lock = threading.Lock()
 
     def get(self, path: str | Path) -> ts.TensorStore:
         """The opened handle for `path`, opening and caching it on first use.
 
         A repeated `get` of the same path returns the identical handle (no re-open)
         and marks it most-recently-used; opening beyond `max_open` distinct paths
-        evicts (drops the reference to) the least-recently-used handle.
+        evicts (drops the reference to) the least-recently-used handle. Thread-safe:
+        the whole check-open-insert-evict sequence runs under the lock.
         """
         key = str(path)
-        handle = self._handles.get(key)
-        if handle is not None:
-            self._handles.move_to_end(key)          # mark most-recently-used
+        with self._lock:
+            handle = self._handles.get(key)
+            if handle is not None:
+                self._handles.move_to_end(key)      # mark most-recently-used
+                return handle
+            handle = open_array(path, self._context)
+            self._handles[key] = handle             # new key lands at the MRU end
+            while len(self._handles) > self._max_open:
+                self._handles.popitem(last=False)   # drop the LRU handle's reference
             return handle
-        handle = open_array(path, self._context)
-        self._handles[key] = handle                 # new key lands at the MRU end
-        while len(self._handles) > self._max_open:
-            self._handles.popitem(last=False)       # drop the LRU handle's reference
-        return handle
+
+    def clear(self) -> None:
+        """Drop every cached handle so the next `get` re-opens the store fresh.
+
+        `ExperimentModel.refresh()` calls this so a growing live store's
+        newly-written planes are re-opened (each `open_array` uses
+        `recheck_cached_data="open"`, which revalidates at open time) rather than
+        served stale from a long-lived handle. Thread-safe.
+        """
+        with self._lock:
+            self._handles.clear()
 
     def __len__(self) -> int:
         """The number of handles currently held (always <= `max_open`)."""
-        return len(self._handles)
+        with self._lock:
+            return len(self._handles)

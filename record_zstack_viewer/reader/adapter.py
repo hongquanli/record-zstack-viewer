@@ -55,9 +55,13 @@ class FormatAdapter(Protocol):
         """True when `root` is an experiment of this adapter's format."""
         ...
 
-    def open_fov(self, root: Path, well: str, fov: int,
-                 context: ts.Context) -> FovDatasets:
-        """Open the acquisition phases present for `(well, fov)` under `root`."""
+    def open_fov(self, root: Path, well: str, fov: int, context: ts.Context,
+                 handles: HandleCache | None = None) -> FovDatasets:
+        """Open the acquisition phases present for `(well, fov)` under `root`.
+
+        `handles`, when given, is a caller-owned store-handle LRU threaded into the
+        sources (so `ExperimentModel` can share one across FOVs and drop it on
+        `refresh()`); absent one, the adapter builds a per-call cache."""
         ...
 
 
@@ -112,12 +116,16 @@ class ZarrV3Adapter:
             _is_fov_store(p.name, fov)
             for p in rec.glob(f"t*/{well}/fov_{fov}*.ome.zarr"))
 
-    def open_fov(self, root: Path, well: str, fov: int,
-                 context: ts.Context) -> FovDatasets:
+    def open_fov(self, root: Path, well: str, fov: int, context: ts.Context,
+                 handles: HandleCache | None = None) -> FovDatasets:
         # One store-handle LRU shared by both phases of this FOV (Task 3.1): repeated
         # reads reuse handles, and the two phases' handles draw from a single bounded
         # pool. Decoded bytes remain bounded separately by the context's cache_pool.
-        handles = HandleCache(context)
+        # A caller (e.g. ExperimentModel) may pass its own long-lived cache so repeated
+        # opens of the same FOV reuse handles AND a model.refresh() can drop them to
+        # surface newly-written data; absent one, build a per-call cache.
+        if handles is None:
+            handles = HandleCache(context)
         recording: FovSource | None = None
         if self._has_recording(root, well, fov):
             recording = build_recording_source(root, well, fov, context, handles)
@@ -131,14 +139,15 @@ class ZarrV3Adapter:
 register_adapter(ZarrV3Adapter())
 
 
-def open_fov(root: str | Path, well: str, fov: int,
-             context: ts.Context) -> FovDatasets:
+def open_fov(root: str | Path, well: str, fov: int, context: ts.Context,
+             handles: HandleCache | None = None) -> FovDatasets:
     """Open the acquisition phases present for `(well, fov)` under `root`.
 
     Detects the experiment's storage format via the adapter registry, then
     delegates to that adapter. v1 has one registered format (Zarr-v3); the
     result is a `FovDatasets` whose `recording`/`zstack` are `FovSource`s, or
-    `None` for a phase with no store for this FOV.
+    `None` for a phase with no store for this FOV. `handles`, when given, is a
+    caller-owned store-handle LRU threaded into the sources (see `ZarrV3Adapter`).
     """
     root = Path(root)
-    return detect_adapter(root).open_fov(root, well, int(fov), context)
+    return detect_adapter(root).open_fov(root, well, int(fov), context, handles)

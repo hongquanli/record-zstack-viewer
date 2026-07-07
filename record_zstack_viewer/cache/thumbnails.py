@@ -180,6 +180,18 @@ class ThumbnailCache:
             self._ram.popitem(last=False)          # evict least-recently-used
         return thumb
 
+    def invalidate(self, well: str, fov: int) -> None:
+        """Drop the RAM-LRU entry for `(well, fov)` so the next `get` re-reads it.
+
+        The RAM cache is keyed by `(well, fov)` alone — no store-state token — so
+        within a session it would keep serving a stale thumbnail after the FOV's
+        data changes (a grown/finalized live store). The live engine calls this on a
+        changed FOV; the next `get` then re-runs the squid-PNG / disk / compute
+        lookup and reflects the change (the disk tier's mtime token already handles
+        the cross-session case). A no-op when nothing is cached for `(well, fov)`.
+        """
+        self._ram.pop((str(well), int(fov)), None)
+
     def _load_or_compute(self, well: str, fov: int) -> np.ndarray:
         squid = self._root / "thumbnails" / well / f"fov_{fov}.png"
         if squid.is_file():                        # 1. producer-rendered thumbnail

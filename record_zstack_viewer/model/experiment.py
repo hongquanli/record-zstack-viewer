@@ -35,6 +35,7 @@ from pathlib import Path
 
 import tensorstore as ts
 
+from record_zstack_viewer.cache.memory import HandleCache
 from record_zstack_viewer.model.geometry import (
     fov_grid_shape, infer_plate_format, spattern_index_to_ij,
     unidirectional_index_to_ij, well_name_to_rc)
@@ -111,6 +112,11 @@ class ExperimentModel:
     def __init__(self, root: str | Path, context: ts.Context):
         self.root = Path(root)
         self._context = context
+        # One long-lived store-handle LRU (the bounded cache of Global Constraints),
+        # shared by every open_fov so repeated opens of a FOV reuse handles. refresh()
+        # clears it so a growing live store's newly-written planes are re-opened rather
+        # than served stale from a long-lived handle (see refresh()).
+        self._handles = HandleCache(context)
         self._acq: dict = {}
         self._coords: dict[tuple[str, int], tuple[float, float]] = {}
         self._expected: dict[str, int] = {}
@@ -143,11 +149,24 @@ class ExperimentModel:
         return infer_plate_format([(float(x), float(y)) for x, y in centers])
 
     def open_fov(self, well: str, fov: int) -> FovDatasets:
-        """Open the reader sources for `(well, fov)` (lazy; pixels read on demand)."""
-        return _reader_open_fov(self.root, well, int(fov), self._context)
+        """Open the reader sources for `(well, fov)` (lazy; pixels read on demand).
+
+        Threads the model's shared store-handle LRU into the sources so repeated
+        opens reuse handles and a `refresh()` can drop them (see `refresh()`)."""
+        return _reader_open_fov(self.root, well, int(fov), self._context, self._handles)
 
     def refresh(self) -> None:
-        """Re-read sidecars and re-walk the tree, rebuilding every `FovNode`."""
+        """Re-read sidecars and re-walk the tree, rebuilding every `FovNode`.
+
+        Also drops the shared store-handle LRU: reads go through handles opened with
+        `recheck_cached_data="open"`, which serve a previously-pending plane's stale
+        `fill_value` even after it is written. Clearing the cache makes the next read
+        re-open the store (revalidating at open) so newly-written data is surfaced;
+        an already-built recording source re-fetches its handle lazily and thus sees
+        the growth too. Node-building itself reads `zarr.json` directly (never through
+        the handle cache), so this stays idempotent for a static experiment.
+        """
+        self._handles.clear()
         self._acq = self._load_acquisition()
         self._coords = self._load_coordinates()
         self._expected = self._load_expected_fovs()

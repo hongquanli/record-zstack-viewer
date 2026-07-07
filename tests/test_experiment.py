@@ -15,7 +15,9 @@ to force the model past step 1.
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
+import tensorstore as ts
 
 from record_zstack_viewer.cache.memory import default_context
 from record_zstack_viewer.model.experiment import ExperimentModel, FovNode
@@ -94,6 +96,74 @@ def test_refresh_is_idempotent(tiny_experiment):
     m.refresh()
     after = {(n.well, n.fov, n.status, n.xy_mm) for w in m.wells() for n in m.fovs(w)}
     assert before == after
+
+
+# --- refresh() surfaces newly-written data (drops long-lived cached handles) --
+
+def _grow_recording(root: Path, well: str, fov: int, *, first: int, last: int,
+                    value: int) -> None:
+    """Write frames [first, last) into the single-plane recording store for
+    (well, fov) at t0 and bump its `_squid` (captured_frames / acquisition_complete),
+    simulating a live acquisition growing the store on disk."""
+    store = root / "recording" / "t0" / well / f"fov_{fov}.ome.zarr"
+    arr = ts.open({"driver": "zarr3",
+                   "kvstore": {"driver": "file", "path": str(store)}}).result()
+    h, w = arr.shape[-2:]
+    for f in range(first, last):
+        arr[f, 0, 0].write(np.full((h, w), value, dtype="uint16")).result()
+    zj = store / "zarr.json"
+    meta = json.loads(zj.read_text())
+    meta["attributes"]["_squid"]["captured_frames"] = last
+    meta["attributes"]["_squid"]["acquisition_complete"] = True
+    zj.write_text(json.dumps(meta, indent=2))
+
+
+def test_refresh_surfaces_newly_written_data(tmp_path):
+    """A plane that was pending (fill 0) at open reads its real data after the store
+    grows and refresh() drops the cached handle.
+
+    Reads go through long-lived cached TensorStore handles opened with
+    recheck_cached_data="open", which serve a previously-pending plane's stale fill
+    even after it is written; refresh() must re-open so the next read surfaces it.
+    """
+    root = generate_experiment(
+        tmp_path / "exp", wells=["A1"], fovs_per_well=1, nt=1,
+        recording_frames=6, recording_planes=1,
+        zstack_channels=[("DAPI", "#4a9eff")], zstack_nz=2,
+        rich=False, complete=False)                  # the only FOV is left partial
+
+    m = ExperimentModel(root, default_context())
+    rec = m.open_fov("A1", 0).recording
+    idx = {"acq_t": 0, "frame": 5, "z": 0}
+    assert rec.filled_extent("frame") == 3           # captured_frames=3 of 6 (partial)
+    assert int(rec.read_plane(idx).max()) == 0       # frame 5 pending -> fill (caches handle)
+
+    _grow_recording(root, "A1", 0, first=3, last=6, value=1234)
+
+    m.refresh()                                       # must drop the cached store handle
+    assert rec.filled_extent("frame") == 6            # the grown extent is now visible
+    assert int(rec.read_plane(idx).max()) == 1234     # REAL data, not stale fill 0
+
+
+def test_refresh_reopened_fov_reads_grown_data(tmp_path):
+    """A FOV re-opened after refresh() (the live-UI flow) also sees the new data —
+    the fresh source is built from a re-opened handle, not a stale cached one."""
+    root = generate_experiment(
+        tmp_path / "exp", wells=["A1"], fovs_per_well=1, nt=1,
+        recording_frames=6, recording_planes=1,
+        zstack_channels=[("DAPI", "#4a9eff")], zstack_nz=2,
+        rich=False, complete=False)
+
+    m = ExperimentModel(root, default_context())
+    idx = {"acq_t": 0, "frame": 5, "z": 0}
+    assert int(m.open_fov("A1", 0).recording.read_plane(idx).max()) == 0   # pending
+
+    _grow_recording(root, "A1", 0, first=3, last=6, value=1234)
+    m.refresh()
+
+    rec2 = m.open_fov("A1", 0).recording              # re-open, as the UI does on_change
+    assert rec2.filled_extent("frame") == 6
+    assert int(rec2.read_plane(idx).max()) == 1234
 
 
 # --- step 2: coordinates.csv (translations stripped, csv present) ------------

@@ -78,6 +78,41 @@ def test_ram_lru_is_bounded(tiny_experiment_poor):
     assert len(tc._ram) <= 2                        # LRU keeps the RAM cache bounded
 
 
+def test_invalidate_drops_ram_entry_so_next_get_reflects_change(tiny_experiment):
+    """invalidate(well, fov) drops the RAM-LRU entry so the next get re-reads.
+
+    The RAM cache is keyed by (well, fov) alone (no token), so within a session it
+    would keep serving a stale thumbnail after the underlying data changes. The live
+    engine calls invalidate on a changed FOV; the next get must reflect the change.
+    """
+    import imageio.v3 as iio
+
+    from record_zstack_viewer.cache.thumbnails import ThumbnailCache
+
+    tc = ThumbnailCache(tiny_experiment)
+    first = tc.get("A1", 0)                          # reads the squid PNG, caches in RAM
+    assert first.ndim == 2 and first.dtype.name == "uint8"
+    assert tc.get("A1", 0) is first                  # repeat is a RAM hit (same object)
+
+    # the underlying source (here the squid-written thumbnail) changes on disk
+    png = tiny_experiment / "thumbnails" / "A1" / "fov_0.png"
+    iio.imwrite(png, np.full((32, 32), 200, dtype="uint8"))
+    assert tc.get("A1", 0) is first                  # still stale until invalidated
+
+    tc.invalidate("A1", 0)                           # drop the RAM entry
+    second = tc.get("A1", 0)                          # RAM miss -> re-read the PNG
+    assert second is not first                        # not the stale RAM object
+    assert not np.array_equal(second, first)          # reflects the changed data
+    assert int(second.max()) == 200                   # the new PNG's value
+
+
+def test_invalidate_is_a_noop_when_uncached(tiny_experiment):
+    from record_zstack_viewer.cache.thumbnails import ThumbnailCache
+    tc = ThumbnailCache(tiny_experiment)
+    tc.invalidate("A1", 0)                            # nothing cached yet -> no error
+    assert ("A1", 0) not in tc._ram
+
+
 def test_thumbnailcache_importable_from_package_no_cycle():
     """Regression guard for the cache<->reader import cycle.
 
