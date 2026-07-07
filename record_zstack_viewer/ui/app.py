@@ -208,6 +208,7 @@ class MainWindow(QMainWindow):
                 raise ValueError(f"{self._mode!r} phase missing for {well}/{fov}")
             self.viewer.update_extent(source)
             self._datasets = datasets              # mode toggles use fresh sources
+            self._sync_mode_buttons()              # a phase appearing mid-run enables its toggle
         except Exception:
             logger.exception("data-only refresh failed for %s FOV %s; "
                              "rebuilding the view", well, fov)

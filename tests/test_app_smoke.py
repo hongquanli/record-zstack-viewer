@@ -21,6 +21,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("NDV_SYNCHRONOUS", "1")   # ndv resolves data requests inline
 
 import json
+import shutil
 import subprocess
 import sys
 import threading
@@ -70,6 +71,32 @@ def live_experiment(tmp_path):
         rich=False, complete=False)
     assert not (root / "events.jsonl").exists()          # precondition: poll path
     return root
+
+
+@pytest.fixture
+def recording_only_experiment(tmp_path):
+    """A complete run with the z-stack tree removed -> every FOV is recording-only
+    (mirrors Task 1.6's recording-only reader fixture)."""
+    root = generate_experiment(
+        tmp_path / "rec_only", wells=["A1", "B2"], fovs_per_well=1, nt=1,
+        recording_frames=5, recording_planes=1,
+        zstack_channels=[("DAPI", "#4a9eff")], zstack_nz=3, rich=False)
+    shutil.rmtree(root / "zarr")                          # drop the z-stack phase
+    return root
+
+
+@pytest.fixture
+def phase_appears_experiment(tmp_path):
+    """Recording-only at first, with the z-stack tree stashed aside so a test can
+    move it in mid-run — what squid does: acquire the recording phase, then the
+    z-stack phase for the same FOV."""
+    root = generate_experiment(
+        tmp_path / "phase_grow", wells=["A1"], fovs_per_well=1, nt=1,
+        recording_frames=5, recording_planes=1,
+        zstack_channels=[("DAPI", "#4a9eff")], zstack_nz=3, rich=False)
+    stash = tmp_path / "zstack_stash"
+    shutil.move(str(root / "zarr"), str(stash))           # FOV starts recording-only
+    return root, stash
 
 
 # --- on-disk growth helpers (what a live acquisition does) --------------------
@@ -176,6 +203,32 @@ def test_mode_toggle_switches_viewer_and_shares_timepoint(qapp, tiny_experiment)
     win.close()
 
 
+def test_single_phase_fov_disables_absent_mode_and_set_mode_is_noop(
+        qapp, recording_only_experiment, no_live_start):
+    """A recording-only FOV: the z-stack toggle is disabled on select, and
+    asking for the absent phase is a clean no-op (no crash, buttons re-synced)."""
+    win = MainWindow(recording_only_experiment)
+    win.navigator.fov_selected.emit("A1", 0)
+    assert win.displayed == ("A1", 0) and win.viewer.mode == "recording"
+    assert win._datasets.zstack is None                  # single-phase FOV
+
+    # present phase enabled + checked; absent phase disabled + unchecked
+    assert win.mode_buttons["recording"].isEnabled()
+    assert win.mode_buttons["recording"].isChecked()
+    assert not win.mode_buttons["zstack"].isEnabled()
+    assert not win.mode_buttons["zstack"].isChecked()
+
+    # asking for the absent phase does nothing but re-sync — no rebuild, no crash
+    viewer_before = win.viewer.ndv_viewer
+    win.set_mode("zstack")
+    assert win.viewer.mode == "recording" and win._mode == "recording"
+    assert win.viewer.ndv_viewer is viewer_before        # display untouched
+    assert not win.mode_buttons["zstack"].isEnabled()
+    assert not win.mode_buttons["zstack"].isChecked()
+    assert win.mode_buttons["recording"].isChecked()     # re-synced
+    win.close()
+
+
 # ------------------------------------ live ------------------------------------
 
 def test_live_tick_updates_navigator_and_refreshes_displayed_data_only(
@@ -256,6 +309,31 @@ def test_live_tick_full_rebuild_fallback_when_data_swap_fails(
     assert win.viewer.mode == "recording"
     pending = {"acq_t": 0, "frame": 5, "z": 0}
     assert int(win.viewer.ndv_viewer.data.read_plane(pending).max()) == 1234
+    win.close()
+
+
+def test_live_refresh_enables_mode_button_when_other_phase_appears(
+        qapp, phase_appears_experiment, no_live_start):
+    """The Phase-5-review fix: when a displayed FOV's *other* phase appears
+    mid-run, the data-only refresh re-syncs the toggle so that phase's button
+    becomes enabled — no re-select needed."""
+    root, stash = phase_appears_experiment
+    win = MainWindow(root)
+    win.navigator.fov_selected.emit("A1", 0)
+    assert win.viewer.mode == "recording"
+    assert win._datasets.zstack is None                  # z-stack absent so far
+    assert not win.mode_buttons["zstack"].isEnabled()
+
+    win._live.tick()                                     # poll path: baseline
+
+    shutil.move(str(stash), str(root / "zarr"))          # z-stack phase appears
+    win._live.tick()                                     # the tick sees it
+
+    # the recording view is kept AND the toggle is re-synced: the now-present
+    # z-stack button is enabled without re-selecting the FOV
+    assert win.viewer.mode == "recording"
+    assert win._datasets.zstack is not None
+    assert win.mode_buttons["zstack"].isEnabled()
     win.close()
 
 
