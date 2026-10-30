@@ -123,6 +123,41 @@ def open_frames(store: Path) -> ts.TensorStore:
                     "open": True, "create": False}).result()
 
 
+class UnsupportedStore(ValueError):
+    """The store is not a recording this converter knows how to read faithfully."""
+
+
+def check_store(store: Path) -> dict:
+    """Refuse anything but the recording layout this converter was written for,
+    so a format change fails loudly instead of converting the wrong thing.
+
+    Expects a Zarr v3 ARRAY node at the store root, five dimensions (T, C, Z, Y,
+    X) with C and Z of size 1, an integer dtype, and `_squid.structure ==
+    "5D-TCZYX"` when `_squid` is present. Returns the parsed `zarr.json`.
+    """
+    store = Path(store)
+    try:
+        meta = json.loads((store / "zarr.json").read_text())
+    except FileNotFoundError:
+        raise UnsupportedStore(f"{store.name}: no zarr.json (not a zarr store)") from None
+    problems = []
+    if meta.get("zarr_format") != 3:
+        problems.append(f"zarr_format {meta.get('zarr_format')!r}, expected 3")
+    if meta.get("node_type") != "array":
+        problems.append(f"node_type {meta.get('node_type')!r}, expected 'array' at the store root")
+    shape = meta.get("shape") or []
+    if len(shape) != 5 or shape[1] != 1 or shape[2] != 1:
+        problems.append(f"shape {shape}, expected (T, 1, 1, Y, X)")
+    if not str(meta.get("data_type", "")).startswith(("uint", "int")):
+        problems.append(f"data_type {meta.get('data_type')!r}, expected an integer type")
+    structure = ((meta.get("attributes") or {}).get("_squid") or {}).get("structure")
+    if structure not in (None, "5D-TCZYX"):
+        problems.append(f"_squid.structure {structure!r}, expected '5D-TCZYX'")
+    if problems:
+        raise UnsupportedStore(f"{store.name}: store format not supported: " + "; ".join(problems))
+    return meta
+
+
 # -------------------------------------------------------------- conversion
 
 def data_window(arr: ts.TensorStore, n_frames: int) -> tuple[float, float]:
@@ -174,6 +209,7 @@ def convert_store(store: str | Path, out: str | Path, *, fps: float | None = Non
     previous: np.ndarray | None = None
     result.error = "interrupted"  # cleared only when every frame went through
     try:
+        check_store(store)
         arr = open_frames(store)
         n_frames = frames_written(store, int(arr.shape[0]))
         if n_frames == 0:

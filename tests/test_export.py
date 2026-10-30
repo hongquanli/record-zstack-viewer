@@ -361,3 +361,28 @@ def test_main_window_reuses_one_export_dialog(qapp, single_plane):
     second = win.open_export_dialog()                 # idle dialog is replaced, not stacked
     assert second is not first and win._export_dialog is second
     win.close()
+
+
+# ------------------------------------------------------------ format guard
+
+def test_converter_refuses_a_store_it_does_not_understand(model, out):
+    """A format change must fail loudly, never convert the wrong thing."""
+    job = mp4.plan(model, out)[0]
+    assert convert.check_store(job.store)["shape"] == [6, 1, 1, 64, 64]
+
+    meta_path = job.store / "zarr.json"
+    meta = json.loads(meta_path.read_text())
+    meta["shape"] = [6, 2, 1, 64, 64]                                  # a channel axis appeared
+    meta_path.write_text(json.dumps(meta))
+    result = mp4.export_job(job)
+    assert not result.ok and "store format not supported" in result.error and "expected (T, 1, 1, Y, X)" in result.error
+    assert not job.out.exists() and _tmp_files(out) == []
+
+    meta["shape"] = [6, 1, 1, 64, 64]
+    meta["attributes"]["_squid"]["structure"] = "4D-TZYX"               # producer renamed its layout
+    meta_path.write_text(json.dumps(meta))
+    with pytest.raises(convert.UnsupportedStore, match="_squid.structure"):
+        convert.check_store(job.store)
+
+    with pytest.raises(convert.UnsupportedStore, match="no zarr.json"):
+        convert.check_store(out / "nowhere")
