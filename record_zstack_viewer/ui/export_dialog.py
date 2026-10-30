@@ -175,8 +175,13 @@ def fov_selector(n_fovs: int, parent: QWidget | None = None) -> MatrixSelector:
     rows = math.ceil(n_fovs / cols)
     names = {(k // cols, k % cols): str(k) for k in range(n_fovs)}
     present = set(names.values())
-    return MatrixSelector(names, rows, cols, [""] * rows, present, present,
-                          show_text=True, parent=parent)
+    matrix = MatrixSelector(names, rows, cols, [""] * rows, present, present,
+                            show_text=True, parent=parent)
+    matrix.horizontalHeader().hide()  # the cells carry the FOV index themselves
+    matrix.verticalHeader().hide()
+    matrix.setFixedSize(matrix.width() - matrix.verticalHeader().width(),
+                        matrix.height() - matrix.horizontalHeader().height())
+    return matrix
 
 
 # -------------------------------------------------------------------- dialog
@@ -194,7 +199,7 @@ class ExportDialog(QDialog):
         self._model = model
         self.worker: ExportWorker | None = None
         self.setWindowTitle("Export recordings to mp4")
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(600)
         form = QFormLayout(self)
 
         # -- wells: the plate matrix -------------------------------------------
@@ -207,7 +212,7 @@ class ExportDialog(QDialog):
         n_fovs = max((len(model.fovs(w)) for w in wells), default=1)
         self.fovs = fov_selector(n_fovs, self) if n_fovs > 1 else None
         if self.fovs is not None:
-            form.addRow("FOVs per well", self._with_all_none(self.fovs, "same FOV indices in every well"))
+            form.addRow("FOVs per well", self._with_all_none(self.fovs, "same indices in every well"))
 
         # -- output folder -------------------------------------------------------
         self.out_dir = QLineEdit(_short(default_out_dir(model.root)), self)
@@ -222,8 +227,10 @@ class ExportDialog(QDialog):
         self.contrast = QComboBox(self)
         if screen_clims is not None:
             lo, hi = screen_clims
-            self.contrast.addItem(f"As on screen ({lo:.0f} – {hi:.0f}), for every selected well", screen_clims)
-        self.contrast.addItem("Auto per video (1 – 99.9 percentile of sampled frames)", None)
+            self.contrast.addItem(f"As on screen ({lo:.0f} – {hi:.0f})", screen_clims)
+        self.contrast.addItem("Auto per video (1 – 99.9 percentile)", None)
+        self.contrast.setToolTip("One fixed window for the whole video. 'As on screen' applies the "
+                                 "displayed recording's limits to every selected well.")
         form.addRow("Contrast", self.contrast)
 
         # -- resolution: show what comes out; allow full size over the cap --------
