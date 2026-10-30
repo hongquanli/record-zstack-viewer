@@ -1,4 +1,5 @@
-"""zarr -> mp4 export: planning, encoding, partial stores, holes, failures, cancel, CLI, dialog."""
+"""zarr -> mp4 export: planning, encoding, fidelity, partial stores, holes, failures,
+cancel, CLI, dialog (plate matrix, worker lifecycle)."""
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -26,6 +27,14 @@ def _decode(path: Path, h: int, w: int) -> np.ndarray:
         [imageio_ffmpeg.get_ffmpeg_exe(), "-loglevel", "error", "-i", str(path),
          "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True, check=True).stdout
     return np.frombuffer(out, dtype=np.uint8).reshape(-1, h, w)
+
+
+def _metadata_comment(path: Path) -> str:
+    """The container's `comment` tag, from `ffmpeg -i`'s stderr listing."""
+    info = subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-i", str(path)],
+                          capture_output=True, text=True).stderr
+    return next((line.split(":", 1)[1].strip() for line in info.splitlines()
+                 if line.strip().startswith("comment")), "")
 
 
 def _tmp_files(folder: Path) -> list[Path]:
@@ -76,9 +85,13 @@ def test_plan_multi_plane_time_lapse(tiny_experiment, out):
     assert names[0] == "A1_fov0_t0_z0.mp4" and names[-1] == "B2_fov0_t1_z2.mp4"
 
 
+def test_default_out_dir_is_downloads_per_experiment(tmp_path):
+    assert mp4.default_out_dir(tmp_path / "2026-10-30_run") == Path.home() / "Downloads" / "videos-2026-10-30_run"
+
+
 # ------------------------------------------------------------------ encoding
 
-def test_export_writes_every_frame(model, out):
+def test_export_writes_every_frame_at_full_size(model, out):
     job = mp4.plan(model, out)[0]
     result = mp4.export_job(model, job)
     assert result.ok and result.frames == 6 and result.held == 0
@@ -86,14 +99,20 @@ def test_export_writes_every_frame(model, out):
     assert _decode(job.out, 64, 64).shape == (6, 64, 64)
 
 
-def test_contrast_is_fixed_for_the_whole_video(model, out):
-    """With explicit clims the blob (2000 counts) saturates and the noise (<300)
-    stays dark in every frame: no per-frame renormalisation."""
+def test_window_is_the_videos_min_max_and_clips_nothing(model, out):
+    source = model.open_fov("A1", 0).recording
+    frames = np.stack([source.read_plane({"acq_t": 0, "frame": f, "z": 0}) for f in range(6)])
     job = mp4.plan(model, out)[0]
-    assert mp4.export_job(model, job, clims=(0.0, 1000.0)).ok
-    frames = _decode(job.out, 64, 64)
-    blob, corner = frames[:, 26, 26], frames[:, 0, 0]       # blob centre is at 40 % of 64
-    assert (blob > 245).all() and (corner < 90).all()
+    result = mp4.export_job(model, job)
+    assert result.window == (float(frames.min()), float(frames.max()))
+    assert result.summary() == f"A1_fov0.mp4: 6 frames, window {frames.min()}–{frames.max()}"
+
+    # the same linear map, applied by us, reproduces the decoded video closely (near-lossless)
+    lo, hi = result.window
+    expected = np.clip(np.rint((frames.astype(np.float32) - lo) * 255.0 / (hi - lo)), 0, 255)
+    decoded = _decode(job.out, 64, 64).astype(np.float32)
+    assert np.abs(decoded - expected).mean() < 1.5
+    assert f"window {lo:g}-{hi:g}" in _metadata_comment(job.out)       # mapping travels with the file
 
 
 def test_real_time_fps_reaches_ffmpeg(model, out, monkeypatch):
@@ -129,11 +148,13 @@ def test_partial_store_exports_captured_frames(tmp_path, out):
 
 
 def test_unwritten_slot_repeats_previous_frame(model, out):
-    store = model.open_fov("A1", 0).recording.store_path(0, 0)
-    shutil.rmtree(store / "c" / "3")                   # frame 3 was never written
+    source = model.open_fov("A1", 0).recording
+    written = np.stack([source.read_plane({"acq_t": 0, "frame": f, "z": 0}) for f in (0, 1, 2, 4, 5)])
+    shutil.rmtree(source.store_path(0, 0) / "c" / "3")  # frame 3 was never written
     job = mp4.plan(model, out)[0]
     result = mp4.export_job(model, job)
     assert result.ok and result.held == 1 and result.frames == 6
+    assert result.window == (float(written.min()), float(written.max()))  # empty slot ignored
     frames = _decode(job.out, 64, 64)
     assert np.abs(frames[3].astype(int) - frames[2].astype(int)).mean() < 1.0
 
@@ -146,24 +167,6 @@ def test_odd_frame_size_is_cropped_even(tmp_path, out):
     job = mp4.plan(model, out)[0]
     assert mp4.export_job(model, job).ok
     assert _decode(job.out, 32, 64).shape == (2, 32, 64)
-
-
-def test_output_size_even_and_capped():
-    assert mp4.output_size(3112, 2084) == (3112, 2084)             # under the cap: untouched
-    assert mp4.output_size(6224, 4168) == (4096, 2742)             # 1x1-binned ToupTek, aspect kept
-    assert mp4.output_size(6224, 4168, max_side=None) == (6224, 4168)
-    assert mp4.output_size(33, 65, max_side=None) == (32, 64)      # odd sides cropped
-    assert "-vf" not in mp4._ffmpeg_command(32, 20, 10.0, Path("x.mp4"), max_side=32)
-    cmd = mp4._ffmpeg_command(64, 40, 10.0, Path("x.mp4"), max_side=32)
-    assert cmd[cmd.index("-vf") + 1] == "scale=32:20"
-
-
-def test_export_downscales_to_max_side_unless_full_res(model, out):
-    job = mp4.plan(model, out)[0]
-    assert mp4.export_job(model, job, max_side=32).ok
-    assert _decode(job.out, 32, 32).shape == (6, 32, 32)
-    assert mp4.export_job(model, job, max_side=None).ok
-    assert _decode(job.out, 64, 64).shape == (6, 64, 64)
 
 
 # ------------------------------------------------------------- failure paths
@@ -217,38 +220,13 @@ def qapp():
     yield QApplication.instance() or QApplication([])
 
 
-def test_default_out_dir_is_downloads_per_experiment(tmp_path):
-    assert mp4.default_out_dir(tmp_path / "2026-10-30_run") == Path.home() / "Downloads" / "videos-2026-10-30_run"
-
-
 def _wait(dialog, qapp, timeout_ms=30_000) -> None:
-    """Run the event loop until the worker has finished and its signals landed."""
+    """Run the event loop until the worker thread has exited and its signals landed."""
     from qtpy.QtCore import QDeadlineTimer
     deadline = QDeadlineTimer(timeout_ms)
     while dialog.worker is not None and not deadline.hasExpired():
         qapp.processEvents()
     assert dialog.worker is None, "export did not finish"
-
-
-def test_dialog_exports_current_well_in_worker(qapp, model, out):
-    from record_zstack_viewer.ui.export_dialog import ExportDialog
-
-    dialog = ExportDialog(model, current_well="B2")
-    assert dialog.wells.selected() == ["B2"]                       # displayed well pre-selected
-    assert dialog.out_dir.text() == "~/Downloads/videos-exp"      # shown with ~, never a full home path
-    dialog.out_dir.setText(str(out))
-    assert dialog.options().out_dir == out
-    dialog.start()
-    _wait(dialog, qapp)
-    assert sorted(p.name for p in out.iterdir()) == ["B2_fov0.mp4"]
-    assert "B2_fov0.mp4: 6 frames" in dialog.log.toPlainText()
-    assert dialog.status.text().startswith("Done: 1 file")
-    assert dialog.start_button.isEnabled() and not dialog.cancel_button.isEnabled()
-
-    dialog.start()                                     # second run: nothing left to do
-    _wait(dialog, qapp)
-    assert dialog.log.toPlainText().count("frames") == 1
-    assert dialog.status.text().startswith("Done: 0 file")
 
 
 def test_grid_shape_uses_the_format_else_the_smallest_plate_that_fits():
@@ -262,8 +240,8 @@ def test_grid_shape_uses_the_format_else_the_smallest_plate_that_fits():
 
 def test_well_selector_is_a_plate_matrix(qapp, model):
     """Present wells are selectable, absent wells are not; a rectangle (what a
-    shift-click does) only picks up present wells; All/None work."""
-    from qtpy.QtWidgets import QTableWidgetSelectionRange
+    shift-click does) only picks up present wells; All works; no None button."""
+    from qtpy.QtWidgets import QPushButton, QTableWidgetSelectionRange
     from record_zstack_viewer.ui.export_dialog import ExportDialog
 
     dialog = ExportDialog(model)                       # A1 and B2; fixture spacing 9 mm -> 96-well
@@ -272,7 +250,6 @@ def test_well_selector_is_a_plate_matrix(qapp, model):
     assert sel.selected() == ["A1", "B2"]                          # nothing displayed: all present wells
     assert sel.item(0, 1).flags() == Qt.NoItemFlags                # A2 absent: greyed, unselectable
     sel.clearSelection()
-    assert sel.selected() == []
     sel.setRangeSelected(QTableWidgetSelectionRange(0, 0, 7, 11), True)  # whole plate rectangle
     assert sel.selected() == ["A1", "B2"]
     sel.clearSelection()
@@ -280,6 +257,43 @@ def test_well_selector_is_a_plate_matrix(qapp, model):
     assert sel.selected() == ["B2"]
     sel.selectAll()
     assert sel.selected() == ["A1", "B2"]
+    assert [b.text() for b in dialog.findChildren(QPushButton)] == ["All", "Browse…", "Export", "Cancel", "Close"]
+
+
+def test_dialog_exports_current_well_in_worker(qapp, model, out):
+    from record_zstack_viewer.ui.export_dialog import ExportDialog
+
+    dialog = ExportDialog(model, current_well="B2")
+    assert dialog.wells.selected() == ["B2"]                       # displayed well pre-selected
+    assert dialog.out_dir.text() == "~/Downloads/videos-exp"      # shown with ~, never a full home path
+    dialog.out_dir.setText(str(out))
+    assert dialog.output_path() == out
+    dialog.start()
+    _wait(dialog, qapp)
+    assert sorted(p.name for p in out.iterdir()) == ["B2_fov0.mp4"]
+    assert "B2_fov0.mp4: 6 frames, window" in dialog.log.toPlainText()
+    assert dialog.status.text().startswith("Done: 1 file")
+    assert dialog.start_button.isEnabled() and not dialog.cancel_button.isEnabled()
+
+    dialog.start()                                     # second run: nothing left to do
+    _wait(dialog, qapp)
+    assert dialog.log.toPlainText().count("frames") == 1
+    assert dialog.status.text().startswith("Done: 0 file")
+
+
+def test_worker_reference_survives_until_the_thread_exits(qapp, model, out):
+    """Regression: `finished_all` is emitted from inside run(); releasing the
+    QThread there destroyed it while still running and aborted the app."""
+    from record_zstack_viewer.ui.export_dialog import ExportDialog
+
+    dialog = ExportDialog(model)
+    dialog.out_dir.setText(str(out))
+    dialog.start()
+    worker = dialog.worker
+    dialog._on_finished(2, "")                         # what finished_all triggers
+    assert dialog.worker is worker                     # still held: the thread may be running
+    _wait(dialog, qapp)                                # released only by `finished`
+    assert dialog.worker is None and not worker.isRunning()
 
 
 def test_empty_selection_is_refused_and_subset_exports(qapp, model, out):
@@ -294,52 +308,6 @@ def test_empty_selection_is_refused_and_subset_exports(qapp, model, out):
     dialog.start()
     _wait(dialog, qapp)
     assert sorted(p.name for p in out.iterdir()) == ["B2_fov0.mp4"]
-
-
-def test_dialog_options_contrast_resolution_and_fovs(qapp, model, out, tmp_path, monkeypatch):
-    from record_zstack_viewer.ui import export_dialog
-    from record_zstack_viewer.ui.export_dialog import ExportDialog
-
-    # on-screen contrast is the default when given; auto otherwise
-    d = ExportDialog(model, current_well="A1", screen_clims=(100.0, 2000.0))
-    assert d.contrast.currentData() == (100.0, 2000.0) and d.contrast.count() == 2
-    assert ExportDialog(model).contrast.currentData() is None
-    assert d.fovs is None                                          # one FOV per well: no FOV row
-    assert d.resolution.text() == "64 × 64" and d.full_res.isHidden()
-
-    # frames over the cap: shown as downscaled, full_res restores them
-    monkeypatch.setattr(export_dialog, "MAX_SIDE_PX", 32)
-    d = ExportDialog(model)
-    assert d.resolution.text().startswith("64 × 64 → 32 × 32") and not d.full_res.isHidden()
-    assert d.options().max_side == 32
-    d.full_res.setChecked(True)
-    assert d.resolution.text() == "64 × 64" and d.options().max_side is None
-
-    # several FOVs per well: a FOV matrix, same indices in every well
-    root = generate_experiment(tmp_path / "multi", wells=["A1", "B2"], fovs_per_well=3, nt=1,
-                               recording_frames=2, recording_planes=1,
-                               zstack_channels=[("DAPI", "#4a9eff")], zstack_nz=1)
-    d = ExportDialog(ExperimentModel(root, default_context()))
-    assert d.fovs is not None and d.fovs.selected() == ["0", "1", "2"]
-    d.fovs.clearSelection()
-    d.fovs.item(0, 1).setSelected(True)
-    d.out_dir.setText(str(out))
-    assert d.options().fovs == {1}
-    d.start()
-    _wait(d, qapp)
-    assert sorted(p.name for p in out.iterdir()) == ["A1_fov1.mp4", "B2_fov1.mp4"]
-
-
-def test_fov_viewer_exposes_current_clims(qapp, model):
-    from record_zstack_viewer.ui.fov_viewer import FovViewer
-    viewer = FovViewer()
-    assert viewer.current_clims() is None
-    datasets = model.open_fov("A1", 0)
-    viewer.set_datasets(datasets, "recording")
-    lo, hi = viewer.current_clims()
-    assert 0 <= lo < hi <= 65535
-    viewer.set_datasets(datasets, "zstack")
-    assert viewer.current_clims() is None                          # only recordings export
 
 
 def test_dialog_reports_a_planning_error_and_recovers(qapp, model, out, monkeypatch):

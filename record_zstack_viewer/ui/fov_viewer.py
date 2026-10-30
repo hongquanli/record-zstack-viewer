@@ -342,16 +342,6 @@ class FovViewer(QWidget):
         t = self._viewer.display_model.current_index.get("acq_t", 0)
         return int(t) if isinstance(t, int) else 0
 
-    def current_clims(self) -> tuple[float, float] | None:
-        """The displayed recording's contrast limits `(lo, hi)` as the user sees
-        them, or None when no recording is on display (what "export with the
-        contrast on screen" uses)."""
-        if self._viewer is None or self._mode != "recording":
-            return None
-        clims = self._viewer.display_model.default_lut.clims
-        lo, hi = getattr(clims, "min", None), getattr(clims, "max", None)
-        return (float(lo), float(hi)) if lo is not None and hi is not None else None
-
     def auto_contrast(self) -> None:
         """Recompute the 1–99.9 percentile limits from the current plane(s)."""
         if self._viewer is None or self._source is None:

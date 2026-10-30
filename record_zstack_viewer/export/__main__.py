@@ -1,8 +1,8 @@
 """CLI: ``python -m record_zstack_viewer.export EXPERIMENT [--well A1] [--out DIR]``.
 
 Converts every recording store of an experiment (or of the given wells) to
-mp4, one file per store, skipping files that are already up to date. Qt-free,
-so it runs on a headless box.
+mp4, one file per store, skipping files that are already up to date (delete an
+mp4 to regenerate it). Qt-free, so it runs on a headless box.
 """
 from __future__ import annotations
 
@@ -26,7 +26,6 @@ def main(argv: list[str] | None = None) -> int:
                         help="output folder (default: ~/Downloads/videos-<experiment name>)")
     parser.add_argument("--fps", type=float, default=None,
                         help="playback rate (default: real time, as recorded)")
-    parser.add_argument("--overwrite", action="store_true", help="re-export existing mp4s")
     args = parser.parse_args(argv)
 
     root = args.experiment.expanduser()
@@ -35,19 +34,14 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = args.out.expanduser() if args.out is not None else default_out_dir(root)
 
     model = ExperimentModel(root, default_context())
-    jobs = plan(model, out_dir, wells=args.well, overwrite=args.overwrite)
+    jobs = plan(model, out_dir, wells=args.well)
     if not jobs:
         print("nothing to export (all mp4s up to date)")
         return 0
     failures = 0
     for result in export_all(model, jobs, fps=args.fps):
-        name = result.job.out.name
-        if result.ok:
-            note = f" ({result.held} held)" if result.held else ""
-            print(f"{name}: {result.frames} frames{note}")
-        else:
-            failures += 1
-            print(f"{name}: FAILED: {result.error}", file=sys.stderr)
+        failures += not result.ok
+        print(result.summary(), file=sys.stdout if result.ok else sys.stderr)
     return 1 if failures else 0
 
 

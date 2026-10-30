@@ -3,9 +3,15 @@
 One recording store, i.e. one `(well, fov, acq_t, z-plane)`, becomes one mp4.
 Frames stream through the existing `FovSource.read_plane`, one at a time, into
 an ffmpeg pipe (the `imageio-ffmpeg` wheel ships the binary), so memory does
-not grow with the video length. Contrast is one fixed `(lo, hi)` for the whole
-video, by default the same 1-99.9 percentile rule the viewer applies on first
-display, taken over a few sampled frames.
+not grow with the video length.
+
+The zarr is the ground truth and is opened read-only. The mp4 keeps as much
+of it as the format allows: full pixel resolution, every captured frame, the
+real-time playback rate, and a near-lossless H.264 encode. What mp4 cannot
+hold is 16-bit data: player-compatible H.264 is 8-bit, so every frame goes
+through ONE linear window per video, the video's own min and max, which clips
+nothing. The window is recorded in the result and in the mp4's metadata
+(`comment`), so the mapping is auditable from the file alone.
 
 No Qt here: the CLI and the dialog both call `plan()` and `export_all()`.
 """
@@ -23,9 +29,7 @@ import numpy as np
 from record_zstack_viewer.model.experiment import ExperimentModel
 from record_zstack_viewer.reader.zarr_v3 import RecordingFovSource
 
-AUTO_PERCENTILES = (1.0, 99.9)  # same rule as the viewer's first-display contrast
-MAX_SIDE_PX = 4096              # H.264 level 5.1 decoder limit; larger frames are downscaled
-CRF = 18                        # visually lossless
+CRF = 12                        # near-lossless; still plays everywhere
 CANCELLED = "cancelled"         # ExportResult.error of a job stopped by the caller
 
 
@@ -41,13 +45,25 @@ class ExportJob:
 @dataclass
 class ExportResult:
     job: ExportJob
-    frames: int = 0           # frames written to the mp4
-    held: int = 0             # unwritten slots filled by repeating the previous frame
-    error: str | None = None  # set when no file was written
+    frames: int = 0                           # frames written to the mp4
+    held: int = 0                             # unwritten slots filled by repeating the previous frame
+    window: tuple[float, float] | None = None  # the 16-to-8 window used
+    error: str | None = None                  # set when no file was written
 
     @property
     def ok(self) -> bool:
         return self.error is None
+
+    def summary(self) -> str:
+        """One log line: `A1_fov0.mp4: 30 frames, window 4–65534`."""
+        name = self.job.out.name
+        if self.error == CANCELLED:
+            return f"{name}: cancelled"
+        if self.error is not None:
+            return f"{name}: FAILED: {self.error}"
+        held = f", {self.held} held frame(s)" if self.held else ""
+        lo, hi = self.window
+        return f"{name}: {self.frames} frames{held}, window {lo:.0f}–{hi:.0f}"
 
 
 # ------------------------------------------------------------------ planning
@@ -72,20 +88,20 @@ def video_name(well: str, fov: int, acq_t: int, z: int, n_t: int, n_z: int,
 
 
 def plan(model: ExperimentModel, out_dir: Path, wells: list[str] | None = None,
-         fovs: set[int] | None = None, overwrite: bool = False) -> list[ExportJob]:
-    """Every recording store of `wells` (default: all) as an `ExportJob`; `fovs`
-    (default: all) restricts the FOV indices within each well.
+         overwrite: bool = False) -> list[ExportJob]:
+    """Every recording store of `wells` (default: all) as an `ExportJob`.
 
-    A store whose mp4 is already on disk and newer than the store is left out
-    unless `overwrite`. A store still being written (not complete while the run
-    has no `.done` marker yet) is left out; a later run picks it up.
+    An mp4 already on disk and newer than its store is left out (`overwrite`
+    re-plans it; it only ever replaces mp4 files, the zarr is read-only). A
+    store still being written (not complete while the run has no `.done`
+    marker yet) is left out; a later run picks it up.
     """
     out_dir = Path(out_dir)
     run_finished = (Path(model.root) / ".done").exists()
     jobs: list[ExportJob] = []
     for well in wells if wells is not None else model.wells():
         for node in model.fovs(well):
-            if not node.has_recording or (fovs is not None and node.fov not in fovs):
+            if not node.has_recording:
                 continue
             source = model.open_fov(well, node.fov).recording
             n_t, _frames, n_z = source.shape[:3]
@@ -118,51 +134,45 @@ def default_fps(source: RecordingFovSource) -> float:
     return round(1.0 / meta.time_increment_s, 3) if meta.time_increment_s > 0 else 10.0
 
 
-def auto_clims(source: RecordingFovSource, acq_t: int, z: int, n_frames: int) -> tuple[float, float]:
-    """Percentile limits over the first, middle and last written frame."""
-    picks = sorted({0, n_frames // 2, n_frames - 1})
-    sample = np.stack([source.read_plane({"acq_t": acq_t, "frame": f, "z": z}) for f in picks])
-    lo, hi = (float(v) for v in np.percentile(sample, AUTO_PERCENTILES))
+def data_window(source: RecordingFovSource, acq_t: int, z: int, n_frames: int) -> tuple[float, float]:
+    """The video's own `(min, max)` over every written frame: the linear 16-to-8
+    window that clips nothing. One read pass; frames are not kept."""
+    lo, hi = np.inf, -np.inf
+    for f in range(n_frames):
+        plane = source.read_plane({"acq_t": acq_t, "frame": f, "z": z})
+        if plane.any():  # a never-written slot is all fill value, not data
+            lo, hi = min(lo, float(plane.min())), max(hi, float(plane.max()))
+    if not np.isfinite(lo):
+        lo, hi = 0.0, 0.0
     return (lo, hi) if hi > lo else (lo, lo + 1.0)
 
 
 def _to_uint8(plane: np.ndarray, lo: float, hi: float) -> np.ndarray:
     scaled = (plane.astype(np.float32) - lo) * (255.0 / (hi - lo))
-    return np.clip(scaled, 0.0, 255.0).astype(np.uint8)
-
-
-def output_size(width: int, height: int, max_side: int | None = MAX_SIDE_PX) -> tuple[int, int]:
-    """The encoded frame size: even sides, downscaled to fit `max_side` (None: never)."""
-    width -= width % 2  # yuv420p needs even sides
-    height -= height % 2
-    if max_side and max(width, height) > max_side:
-        scale = max_side / max(width, height)
-        width, height = round(width * scale) // 2 * 2, round(height * scale) // 2 * 2
-    return width, height
+    return np.clip(np.rint(scaled), 0.0, 255.0).astype(np.uint8)
 
 
 def _ffmpeg_command(width: int, height: int, fps: float, out: Path,
-                    max_side: int | None = MAX_SIDE_PX) -> list[str]:
-    cmd = [imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error",
-           "-f", "rawvideo", "-pix_fmt", "gray", "-s", f"{width}x{height}",
-           "-r", f"{fps:.3f}", "-i", "-", "-an"]
-    out_w, out_h = output_size(width, height, max_side)
-    if (out_w, out_h) != (width, height):
-        cmd += ["-vf", f"scale={out_w}:{out_h}"]
-    cmd += ["-c:v", "libx264", "-preset", "medium", "-crf", str(CRF),
-            "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-f", "mp4", str(out)]
-    return cmd
+                    window: tuple[float, float], dtype: np.dtype) -> list[str]:
+    comment = (f"squid record-zstack export: gray8 = ({dtype.name} - {window[0]:g}) * 255 / "
+               f"{window[1] - window[0]:g}; window {window[0]:g}-{window[1]:g}")
+    return [imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error",
+            "-f", "rawvideo", "-pix_fmt", "gray", "-s", f"{width}x{height}",
+            "-r", f"{fps:.3f}", "-i", "-", "-an",
+            "-c:v", "libx264", "-preset", "medium", "-crf", str(CRF),
+            "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+            "-metadata", f"comment={comment}", "-f", "mp4", str(out)]
 
 
 def export_job(model: ExperimentModel, job: ExportJob, *, fps: float | None = None,
-               clims: tuple[float, float] | None = None, max_side: int | None = MAX_SIDE_PX,
                on_progress: Callable[[int, int], None] | None = None,
                cancelled: Callable[[], bool] | None = None) -> ExportResult:
     """Encode one store to `job.out`. Atomic: a `.tmp` file is renamed on success
     and removed on any failure, cancel or interrupt.
 
-    `fps` defaults to real time (`default_fps`); `clims` to `auto_clims`;
-    `max_side` caps the frame size (None keeps full resolution). A frame slot
+    `fps` defaults to real time (`default_fps`). The 16-to-8 window is the
+    video's own min..max (`data_window`). An odd side is cropped by one pixel
+    (yuv420p needs even sides); nothing else is resampled. A frame slot
     that was never written (all fill value) repeats the previous frame rather
     than flashing black; the count is reported as `held` (a never-written slot
     before the first real frame stays black). `cancelled()` is checked before
@@ -176,7 +186,7 @@ def export_job(model: ExperimentModel, job: ExportJob, *, fps: float | None = No
         return result
 
     height, width = source.shape[-2:]
-    height -= height % 2  # yuv420p needs even sides
+    height -= height % 2
     width -= width % 2
     job.out.parent.mkdir(parents=True, exist_ok=True)
     tmp = job.out.with_name(job.out.name + ".tmp")
@@ -185,8 +195,8 @@ def export_job(model: ExperimentModel, job: ExportJob, *, fps: float | None = No
     result.error = "interrupted"  # cleared only when every frame went through
     try:
         fps = fps or default_fps(source)
-        lo, hi = clims or auto_clims(source, job.acq_t, job.z, n_frames)
-        proc = subprocess.Popen(_ffmpeg_command(width, height, fps, tmp, max_side),
+        lo, hi = result.window = data_window(source, job.acq_t, job.z, n_frames)
+        proc = subprocess.Popen(_ffmpeg_command(width, height, fps, tmp, (lo, hi), source.dtype),
                                 stdin=subprocess.PIPE, stderr=subprocess.PIPE)
         for f in range(n_frames):
             if cancelled is not None and cancelled():

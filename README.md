@@ -39,14 +39,10 @@ UI-thread poll/tick).
 anywhere. Pick wells on the plate matrix (click, shift-click a range, drag; the
 displayed well is pre-selected), one file per recording store (`A1_fov0.mp4`,
 with `_t{t}` / `_z{z}` added for time-lapse / multi-plane runs). Output defaults
-to `~/Downloads/videos-<experiment>/`, never inside the data folder. When wells
-hold several FOVs, a second matrix picks the FOV indices. Contrast defaults to
-what you see on screen when a recording is displayed (one window for every
-selected well), else to an automatic percentile per video. The dialog shows the
-output frame size; frames over 4096 px are downscaled to play anywhere unless
-you tick full resolution. Playback is real time as recorded unless you set an
-fps. Files that are already up to date are skipped. Encoding runs in the
-background; live following keeps working.
+to `~/Downloads/videos-<experiment>/`, never inside the data folder. Playback is
+real time as recorded unless you set an fps. Files that are already up to date
+are skipped (delete an mp4 to regenerate it; the zarr is only ever read).
+Encoding runs in the background; live following keeps working.
 
 The same thing from a shell, no Qt needed:
 
@@ -55,13 +51,19 @@ python -m record_zstack_viewer.export /path/to/experiment                 # all 
 python -m record_zstack_viewer.export /path/to/experiment --well A1 --out ~/videos
 ```
 
-Details: contrast is fixed for the whole video (1–99.9 percentile of sampled
-frames, the viewer's own first-display rule). A store that never completed
-exports its captured frames as `…_partial.mp4`; a frame slot the camera never
-delivered repeats the previous frame instead of flashing black (reported as
-"held"). Frames stream one at a time through ffmpeg (from the `imageio-ffmpeg`
-wheel), so memory does not grow with video length. Odd sizes are cropped to
-even; sides over 4096 px are downscaled to fit the H.264 decoder limit.
+What the conversion does, and does not, change: full pixel resolution, every
+captured frame, real-time rate. An mp4 cannot hold 16-bit data, so each video
+goes through one linear 16-to-8 window, the video's own min and max, which
+clips nothing; the window is printed per file and stored in the mp4's
+`comment` metadata so the mapping can be read back from the file. H.264 at
+CRF 12 is near-lossless, not bit-exact; the zarr stays the ground truth.
+Odd sides are cropped by one pixel (yuv420p needs even sides). Frames wider
+than 4096 px (1x1 binning on large sensors) exceed what some players decode;
+VLC handles them. A store that never completed exports its captured frames as
+`…_partial.mp4`; a frame slot the camera never delivered repeats the previous
+frame instead of flashing black (reported as "held"). Frames stream one at a
+time through ffmpeg (from the `imageio-ffmpeg` wheel), so memory does not grow
+with video length.
 
 ## Launcher & desktop shortcut
 
