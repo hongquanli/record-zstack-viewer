@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 from record_zstack_viewer.cache.memory import default_context
-from record_zstack_viewer.export.mp4 import export_all, plan
+from record_zstack_viewer.export.mp4 import default_out_dir, export_all, plan
 from record_zstack_viewer.model.experiment import ExperimentModel
 
 
@@ -23,7 +23,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--well", action="append", metavar="WELL",
                         help="only this well (repeatable); default: all wells")
     parser.add_argument("--out", type=Path, default=None,
-                        help="output folder (default: EXPERIMENT/videos)")
+                        help="output folder (default: ~/Downloads/<experiment name>)")
     parser.add_argument("--fps", type=float, default=None,
                         help="playback rate (default: real time, as recorded)")
     parser.add_argument("--overwrite", action="store_true", help="re-export existing mp4s")
@@ -32,7 +32,7 @@ def main(argv: list[str] | None = None) -> int:
     root = args.experiment.expanduser()
     if not (root / "recording").is_dir():
         parser.error(f"{root} has no recording/ folder")
-    out_dir = args.out if args.out is not None else root / "videos"
+    out_dir = args.out.expanduser() if args.out is not None else default_out_dir(root)
 
     model = ExperimentModel(root, default_context())
     jobs = plan(model, out_dir, wells=args.well, overwrite=args.overwrite)

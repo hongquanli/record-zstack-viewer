@@ -36,11 +36,12 @@ UI-thread poll/tick).
 ## Export recordings to mp4
 
 **Export mp4…** (top bar) converts recordings to H.264 mp4 files that play
-anywhere: the displayed well or all wells, one file per recording store
-(`A1_fov0.mp4`, with `_t{t}` / `_z{z}` added for time-lapse / multi-plane runs).
-Default output is `{experiment}/videos/` (changeable, remembered). Playback is
-real time as recorded unless you set an fps. Files that are already up to date
-are skipped. Encoding runs in the background; live following keeps working.
+anywhere. Tick the wells you want (the displayed well is pre-selected), one
+file per recording store (`A1_fov0.mp4`, with `_t{t}` / `_z{z}` added for
+time-lapse / multi-plane runs). Output defaults to `~/Downloads/<experiment>/`,
+never inside the data folder. Playback is real time as recorded unless you set
+an fps. Files that are already up to date are skipped. Encoding runs in the
+background; live following keeps working.
 
 The same thing from a shell, no Qt needed:
 

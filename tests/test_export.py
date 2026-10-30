@@ -185,16 +185,16 @@ def test_cancel_discards_the_file_in_progress_and_stops(model, out):
 
 # ----------------------------------------------------------------------- CLI
 
-def test_cli_exports_all_then_reports_nothing_to_do(single_plane, capsys):
-    assert cli_main([str(single_plane)]) == 0
-    assert sorted(p.name for p in (single_plane / "videos").iterdir()) == ["A1_fov0.mp4", "B2_fov0.mp4"]
-    assert cli_main([str(single_plane)]) == 0
+def test_cli_exports_all_then_reports_nothing_to_do(single_plane, out, capsys):
+    assert cli_main([str(single_plane), "--out", str(out)]) == 0
+    assert sorted(p.name for p in out.iterdir()) == ["A1_fov0.mp4", "B2_fov0.mp4"]
+    assert cli_main([str(single_plane), "--out", str(out)]) == 0
     assert "nothing to export" in capsys.readouterr().out
 
 
-def test_cli_returns_1_when_a_file_fails(single_plane, monkeypatch, capsys):
+def test_cli_returns_1_when_a_file_fails(single_plane, out, monkeypatch, capsys):
     monkeypatch.setattr(mp4, "_ffmpeg_command", lambda w, h, fps, o: ["sh", "-c", "exit 1"])
-    assert cli_main([str(single_plane)]) == 1
+    assert cli_main([str(single_plane), "--out", str(out)]) == 1
     assert "FAILED" in capsys.readouterr().err
 
 
@@ -206,12 +206,8 @@ def qapp():
     yield QApplication.instance() or QApplication([])
 
 
-@pytest.fixture(autouse=True)
-def _no_real_settings(monkeypatch):
-    """Keep the tests' folders out of the user's remembered output folder."""
-    from qtpy.QtCore import QSettings
-    monkeypatch.setattr(QSettings, "setValue", lambda self, *a: None)
-    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **k: default)
+def test_default_out_dir_is_downloads_per_experiment(tmp_path):
+    assert mp4.default_out_dir(tmp_path / "2026-10-30_run") == Path.home() / "Downloads" / "2026-10-30_run"
 
 
 def _wait(dialog, qapp, timeout_ms=30_000) -> None:
@@ -227,8 +223,10 @@ def test_dialog_exports_current_well_in_worker(qapp, model, out):
     from record_zstack_viewer.ui.export_dialog import ExportDialog
 
     dialog = ExportDialog(model, current_well="B2")
-    assert dialog.scope.currentData() == "B2" and dialog.out_dir.text().endswith("videos")
+    assert dialog.wells.selected() == ["B2"]                       # displayed well pre-selected
+    assert dialog.out_dir.text() == "~/Downloads/exp"             # shown with ~, never a full home path
     dialog.out_dir.setText(str(out))
+    assert dialog.output_path() == out
     dialog.start()
     _wait(dialog, qapp)
     assert sorted(p.name for p in out.iterdir()) == ["B2_fov0.mp4"]
@@ -240,6 +238,23 @@ def test_dialog_exports_current_well_in_worker(qapp, model, out):
     _wait(dialog, qapp)
     assert dialog.log.toPlainText().count("frames") == 1
     assert dialog.status.text().startswith("Done: 0 file")
+
+
+def test_well_selector_all_none_and_empty_selection(qapp, model, out):
+    from qtpy.QtCore import Qt
+    from record_zstack_viewer.ui.export_dialog import ExportDialog
+
+    dialog = ExportDialog(model)                                   # nothing displayed: all wells
+    assert dialog.wells.selected() == ["A1", "B2"]
+    dialog.wells._set_all(Qt.Unchecked)
+    dialog.out_dir.setText(str(out))
+    dialog.start()
+    assert dialog.worker is None and dialog.status.text() == "Select at least one well."
+    dialog.wells._set_all(Qt.Checked)
+    dialog.wells.list.item(0).setCheckState(Qt.Unchecked)
+    dialog.start()
+    _wait(dialog, qapp)
+    assert sorted(p.name for p in out.iterdir()) == ["B2_fov0.mp4"]
 
 
 def test_dialog_reports_a_planning_error_and_recovers(qapp, model, out, monkeypatch):
@@ -260,7 +275,7 @@ def test_main_window_reuses_one_export_dialog(qapp, single_plane):
     from record_zstack_viewer.ui.app import MainWindow
     win = MainWindow(single_plane)
     first = win.open_export_dialog()
-    assert first.scope.count() == 1                   # nothing displayed yet: all wells only
+    assert first.wells.selected() == ["A1", "B2"]     # nothing displayed yet: all wells
     second = win.open_export_dialog()                 # idle dialog is replaced, not stacked
     assert second is not first and win._export_dialog is second
     win.close()
