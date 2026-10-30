@@ -67,11 +67,12 @@ def default_out_dir(experiment_dir: str | Path) -> Path:
 
 def video_name(well: str, fov: int, acq_t: int, z: int, n_t: int, n_z: int,
                partial: bool) -> str:
-    """`A1_fov0.mp4`, with `_t{t}` / `_z{z}` only when that axis has more than one
-    entry, and `_partial` when the store never completed."""
-    name = f"{well}_fov{fov}"
-    if n_t > 1:
-        name += f"_t{acq_t}"
+    """The store's own name, prefixed by its well: `recording/t0/A1/fov_0.ome.zarr`
+    becomes `A1_fov_0.mp4`, a plane store `fov_0_z1.ome.zarr` becomes
+    `A1_fov_0_z1.mp4`. `_t{t}` is inserted after the well only when the run has
+    several timepoints, `_partial` is appended when the store never completed."""
+    name = f"{well}_t{acq_t}" if n_t > 1 else well
+    name += f"_fov_{fov}"
     if n_z > 1:
         name += f"_z{z}"
     if partial:

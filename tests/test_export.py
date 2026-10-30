@@ -62,15 +62,15 @@ def out(tmp_path):
 # ------------------------------------------------------------------ planning
 
 def test_video_name_adds_axes_only_when_needed():
-    assert mp4.video_name("A1", 0, 0, 0, 1, 1, False) == "A1_fov0.mp4"
-    assert mp4.video_name("A1", 2, 1, 0, 3, 1, False) == "A1_fov2_t1.mp4"
-    assert mp4.video_name("A1", 0, 0, 2, 1, 3, False) == "A1_fov0_z2.mp4"
-    assert mp4.video_name("A1", 0, 1, 2, 2, 3, True) == "A1_fov0_t1_z2_partial.mp4"
+    assert mp4.video_name("A1", 0, 0, 0, 1, 1, False) == "A1_fov_0.mp4"          # mirrors fov_0.ome.zarr
+    assert mp4.video_name("A1", 2, 1, 0, 3, 1, False) == "A1_t1_fov_2.mp4"
+    assert mp4.video_name("A1", 0, 0, 2, 1, 3, False) == "A1_fov_0_z2.mp4"       # mirrors fov_0_z2.ome.zarr
+    assert mp4.video_name("A1", 0, 1, 2, 2, 3, True) == "A1_t1_fov_0_z2_partial.mp4"
 
 
 def test_plan_one_job_per_store_and_skips_up_to_date(model, out):
     jobs = mp4.plan(model, out)
-    assert [(j.well, j.out.name) for j in jobs] == [("A1", "A1_fov0.mp4"), ("B2", "B2_fov0.mp4")]
+    assert [(j.well, j.out.name) for j in jobs] == [("A1", "A1_fov_0.mp4"), ("B2", "B2_fov_0.mp4")]
     assert mp4.plan(model, out, wells=["B2"]) == jobs[1:]
 
     assert mp4.export_job(jobs[0]).ok
@@ -82,7 +82,7 @@ def test_plan_multi_plane_time_lapse(tiny_experiment, out):
     model = ExperimentModel(tiny_experiment, default_context())  # 2 wells, nt=2, 3 planes
     names = sorted(j.out.name for j in mp4.plan(model, out))
     assert len(names) == 12
-    assert names[0] == "A1_fov0_t0_z0.mp4" and names[-1] == "B2_fov0_t1_z2.mp4"
+    assert names[0] == "A1_t0_fov_0_z0.mp4" and names[-1] == "B2_t1_fov_0_z2.mp4"
 
 
 def test_default_out_dir_is_downloads_per_experiment(tmp_path):
@@ -105,7 +105,7 @@ def test_window_is_the_videos_min_max_and_clips_nothing(model, out):
     job = mp4.plan(model, out)[0]
     result = mp4.export_job(job)
     assert result.window == (float(frames.min()), float(frames.max()))
-    assert result.summary() == f"A1_fov0.mp4: 6 frames, window {frames.min()}–{frames.max()}"
+    assert result.summary() == f"A1_fov_0.mp4: 6 frames, window {frames.min()}–{frames.max()}"
 
     # the same linear map, applied by us, reproduces the decoded video closely (near-lossless)
     lo, hi = result.window
@@ -142,7 +142,7 @@ def test_partial_store_exports_captured_frames(tmp_path, out):
     assert mp4.plan(model, out) == []                  # run still going: left alone
     (root / ".done").write_text("")                    # aborted run: .done without completion
     (job,) = mp4.plan(model, out)
-    assert job.out.name == "A1_fov0_partial.mp4"
+    assert job.out.name == "A1_fov_0_partial.mp4"
     result = mp4.export_job(job)
     assert result.ok and result.frames == 3
 
@@ -199,10 +199,10 @@ def test_cancel_discards_the_file_in_progress_and_stops(model, out):
 
 def test_cli_exports_all_then_reports_nothing_to_do(single_plane, out, capsys):
     assert cli_main([str(single_plane), "--out", str(out)]) == 0
-    assert sorted(p.name for p in out.iterdir()) == ["A1_fov0.mp4", "B2_fov0.mp4"]
+    assert sorted(p.name for p in out.iterdir()) == ["A1_fov_0.mp4", "B2_fov_0.mp4"]
     assert cli_main([str(single_plane), "--out", str(out)]) == 0
     text = capsys.readouterr().out
-    assert "A1_fov0.mp4: already exists, skipped" in text and "nothing to export" in text
+    assert "A1_fov_0.mp4: already exists, skipped" in text and "nothing to export" in text
 
 
 def test_cli_returns_1_when_a_file_fails(single_plane, out, monkeypatch, capsys):
@@ -269,15 +269,15 @@ def test_dialog_exports_current_well_in_worker(qapp, model, out):
     assert dialog.output_path() == out
     dialog.start()
     _wait(dialog, qapp)
-    assert sorted(p.name for p in out.iterdir()) == ["B2_fov0.mp4"]
-    assert "B2_fov0.mp4: 6 frames, window" in dialog.log.toPlainText()
+    assert sorted(p.name for p in out.iterdir()) == ["B2_fov_0.mp4"]
+    assert "B2_fov_0.mp4: 6 frames, window" in dialog.log.toPlainText()
     assert dialog.status.text().startswith("Done: 1 file")
     assert dialog.start_button.isEnabled() and not dialog.cancel_button.isEnabled()
 
     dialog.start()                                     # second run: nothing left to do, and it says so
     _wait(dialog, qapp)
     assert dialog.log.toPlainText().count("frames") == 1
-    assert "B2_fov0.mp4: already exists, skipped" in dialog.log.toPlainText()
+    assert "B2_fov_0.mp4: already exists, skipped" in dialog.log.toPlainText()
     assert dialog.status.text().startswith("Done: 0 file")
 
 
@@ -336,7 +336,7 @@ def test_empty_selection_is_refused_and_subset_exports(qapp, model, out):
     dialog.wells.item(1, 1).setSelected(True)                      # B2 only
     dialog.start()
     _wait(dialog, qapp)
-    assert sorted(p.name for p in out.iterdir()) == ["B2_fov0.mp4"]
+    assert sorted(p.name for p in out.iterdir()) == ["B2_fov_0.mp4"]
 
 
 def test_dialog_reports_a_planning_error_and_recovers(qapp, model, out, monkeypatch):

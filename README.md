@@ -37,8 +37,8 @@ UI-thread poll/tick).
 
 **Export mp4…** (top bar) converts recordings to H.264 mp4 files that play
 anywhere. Pick wells on the plate matrix (click, shift-click a range, drag; the
-displayed well is pre-selected), one file per recording store (`A1_fov0.mp4`,
-with `_t{t}` / `_z{z}` added for time-lapse / multi-plane runs). Output defaults
+displayed well is pre-selected), one file per recording store (`A1_fov_0.mp4`, mirroring `fov_0.ome.zarr`,
+with `_z{j}` for plane stores and `_t{t}` after the well for time-lapse runs). Output defaults
 to `~/Downloads/mp4-<experiment>/`, never inside the data folder. Playback is
 real time as recorded unless you set an fps. Files that are already up to date
 are skipped (delete an mp4 to regenerate it; the zarr is only ever read).
