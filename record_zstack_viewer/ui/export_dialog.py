@@ -3,7 +3,7 @@
 Planning and encoding both run on a `QThread` so the window and its live
 following stay responsive; one file at a time (`export_all`). Cancel stops at
 the next frame and discards the file in progress. Output defaults to
-`~/Downloads/videos-<experiment name>/`; paths are shown with `~` for home.
+`~/Downloads/mp4-<experiment name>/`; paths are shown with `~` for home.
 """
 from __future__ import annotations
 
@@ -16,8 +16,7 @@ from qtpy.QtWidgets import (QAbstractItemView, QDialog, QDoubleSpinBox,
                             QLineEdit, QPlainTextEdit, QProgressBar, QPushButton,
                             QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
-from record_zstack_viewer.export.mp4 import (CANCELLED, ExportResult, default_out_dir,
-                                             export_all, plan)
+from record_zstack_viewer.export.mp4 import ConvertResult, default_out_dir, export_all, plan
 from record_zstack_viewer.model.experiment import ExperimentModel
 from record_zstack_viewer.model.geometry import PLATE_FORMATS, well_name_to_rc
 
@@ -31,7 +30,7 @@ class ExportWorker(QThread):
 
     planned = Signal(int)                   # number of files to write
     file_progress = Signal(int, int)        # frames done, frames total (current file)
-    file_done = Signal(object)              # ExportResult
+    file_done = Signal(object)              # ConvertResult
     finished_all = Signal(int, str)         # files written, error text ("" when none)
 
     def __init__(self, model: ExperimentModel, out_dir: Path, wells: list[str],
@@ -49,7 +48,7 @@ class ExportWorker(QThread):
         try:
             jobs = plan(model, out_dir, wells=wells)
             self.planned.emit(len(jobs))
-            for result in export_all(model, jobs, fps=fps, on_progress=self.file_progress.emit,
+            for result in export_all(jobs, fps=fps, on_progress=self.file_progress.emit,
                                      cancelled=lambda: self._cancel):
                 written += int(result.ok)
                 self.file_done.emit(result)
@@ -267,7 +266,7 @@ class ExportDialog(QDialog):
         self.status.setText(f"File {self.progress.value() + 1} / {self.progress.maximum()}: "
                             f"frame {done} / {total}")
 
-    def _on_file_done(self, result: ExportResult) -> None:
+    def _on_file_done(self, result: ConvertResult) -> None:
         self.progress.setValue(self.progress.value() + 1)
         self.log.appendPlainText(result.summary())
 
@@ -285,14 +284,13 @@ class ExportDialog(QDialog):
 
     # ----------------------------------------------------------- lifecycle
 
-    def reject(self) -> None:  # Esc: close (and so cancel), never just hide a running export
-        self.close()
-
-    def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
+    def reject(self) -> None:
+        """Close button, Esc and the window's X all end here (QDialog routes
+        closeEvent through reject). Stop a running export first, then hide."""
         if self.is_running:
             self.worker.cancel()
             self.worker.wait()
-        super().closeEvent(event)
+        super().reject()
 
 
 def _short(path: Path) -> str:

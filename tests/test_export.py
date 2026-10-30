@@ -15,7 +15,7 @@ import pytest
 from qtpy.QtCore import Qt
 
 from record_zstack_viewer.cache.memory import default_context
-from record_zstack_viewer.export import mp4
+from record_zstack_viewer.export import convert, mp4
 from record_zstack_viewer.export.__main__ import main as cli_main
 from record_zstack_viewer.model.experiment import ExperimentModel
 from tests.fixtures.generate import generate_experiment
@@ -73,7 +73,7 @@ def test_plan_one_job_per_store_and_skips_up_to_date(model, out):
     assert [(j.well, j.out.name) for j in jobs] == [("A1", "A1_fov0.mp4"), ("B2", "B2_fov0.mp4")]
     assert mp4.plan(model, out, wells=["B2"]) == jobs[1:]
 
-    assert mp4.export_job(model, jobs[0]).ok
+    assert mp4.export_job(jobs[0]).ok
     assert [j.well for j in mp4.plan(model, out)] == ["B2"]           # A1 is up to date
     assert len(mp4.plan(model, out, overwrite=True)) == 2
 
@@ -86,14 +86,14 @@ def test_plan_multi_plane_time_lapse(tiny_experiment, out):
 
 
 def test_default_out_dir_is_downloads_per_experiment(tmp_path):
-    assert mp4.default_out_dir(tmp_path / "2026-10-30_run") == Path.home() / "Downloads" / "videos-2026-10-30_run"
+    assert mp4.default_out_dir(tmp_path / "2026-10-30_run") == Path.home() / "Downloads" / "mp4-2026-10-30_run"
 
 
 # ------------------------------------------------------------------ encoding
 
 def test_export_writes_every_frame_at_full_size(model, out):
     job = mp4.plan(model, out)[0]
-    result = mp4.export_job(model, job)
+    result = mp4.export_job(job)
     assert result.ok and result.frames == 6 and result.held == 0
     assert job.out.exists() and _tmp_files(out) == []
     assert _decode(job.out, 64, 64).shape == (6, 64, 64)
@@ -103,7 +103,7 @@ def test_window_is_the_videos_min_max_and_clips_nothing(model, out):
     source = model.open_fov("A1", 0).recording
     frames = np.stack([source.read_plane({"acq_t": 0, "frame": f, "z": 0}) for f in range(6)])
     job = mp4.plan(model, out)[0]
-    result = mp4.export_job(model, job)
+    result = mp4.export_job(job)
     assert result.window == (float(frames.min()), float(frames.max()))
     assert result.summary() == f"A1_fov0.mp4: 6 frames, window {frames.min()}–{frames.max()}"
 
@@ -117,12 +117,12 @@ def test_window_is_the_videos_min_max_and_clips_nothing(model, out):
 
 def test_real_time_fps_reaches_ffmpeg(model, out, monkeypatch):
     seen = []
-    real = mp4._ffmpeg_command
-    monkeypatch.setattr(mp4, "_ffmpeg_command",
+    real = convert._ffmpeg_command
+    monkeypatch.setattr(convert, "_ffmpeg_command",
                         lambda w, h, fps, o, *a: seen.append(fps) or real(w, h, fps, o, *a))
     job = mp4.plan(model, out)[0]
-    assert mp4.export_job(model, job).ok and seen == [15.0]          # fixture: 1/15 s per frame
-    assert mp4.export_job(model, job, fps=2.5).ok and seen[-1] == 2.5
+    assert mp4.export_job(job).ok and seen == [15.0]          # fixture: 1/15 s per frame
+    assert mp4.export_job(job, fps=2.5).ok and seen[-1] == 2.5
 
 
 def test_default_fps_prefers_effective_fps(single_plane):
@@ -131,7 +131,7 @@ def test_default_fps_prefers_effective_fps(single_plane):
     meta["attributes"]["_squid"]["effective_fps"] = 9.5
     (store / "zarr.json").write_text(json.dumps(meta))
     source = ExperimentModel(single_plane, default_context()).open_fov("A1", 0).recording
-    assert source.metadata.effective_fps == 9.5 and mp4.default_fps(source) == 9.5
+    assert source.metadata.effective_fps == 9.5 and convert.default_fps(store) == 9.5
 
 
 def test_partial_store_exports_captured_frames(tmp_path, out):
@@ -143,7 +143,7 @@ def test_partial_store_exports_captured_frames(tmp_path, out):
     (root / ".done").write_text("")                    # aborted run: .done without completion
     (job,) = mp4.plan(model, out)
     assert job.out.name == "A1_fov0_partial.mp4"
-    result = mp4.export_job(model, job)
+    result = mp4.export_job(job)
     assert result.ok and result.frames == 3
 
 
@@ -152,7 +152,7 @@ def test_unwritten_slot_repeats_previous_frame(model, out):
     written = np.stack([source.read_plane({"acq_t": 0, "frame": f, "z": 0}) for f in (0, 1, 2, 4, 5)])
     shutil.rmtree(source.store_path(0, 0) / "c" / "3")  # frame 3 was never written
     job = mp4.plan(model, out)[0]
-    result = mp4.export_job(model, job)
+    result = mp4.export_job(job)
     assert result.ok and result.held == 1 and result.frames == 6
     assert result.window == (float(written.min()), float(written.max()))  # empty slot ignored
     frames = _decode(job.out, 64, 64)
@@ -165,34 +165,32 @@ def test_odd_frame_size_is_cropped_even(tmp_path, out):
                                zstack_channels=[("DAPI", "#4a9eff")], zstack_nz=1, hw=(33, 65))
     model = ExperimentModel(root, default_context())
     job = mp4.plan(model, out)[0]
-    assert mp4.export_job(model, job).ok
+    assert mp4.export_job(job).ok
     assert _decode(job.out, 32, 64).shape == (2, 32, 64)
 
 
 # ------------------------------------------------------------- failure paths
 
 def test_ffmpeg_failure_is_reported_and_leaves_no_tmp(model, out, monkeypatch):
-    monkeypatch.setattr(mp4, "_ffmpeg_command", lambda *a: ["sh", "-c", "echo boom >&2; exit 3"])
+    monkeypatch.setattr(convert, "_ffmpeg_command", lambda *a: ["sh", "-c", "echo boom >&2; exit 3"])
     job = mp4.plan(model, out)[0]
-    result = mp4.export_job(model, job)
+    result = mp4.export_job(job)
     assert not result.ok and "boom" in result.error
     assert not job.out.exists() and _tmp_files(out) == []
 
 
 def test_read_error_is_reported_and_leaves_no_tmp(model, out, monkeypatch):
-    from record_zstack_viewer.reader.zarr_v3 import RecordingFovSource
-
-    def broken(self, index):
+    def broken(arr, n_frames):
         raise OSError("torn zarr.json")
-    monkeypatch.setattr(RecordingFovSource, "read_plane", broken)
+    monkeypatch.setattr(convert, "data_window", broken)
     job = mp4.plan(model, out)[0]
-    result = mp4.export_job(model, job)
+    result = mp4.export_job(job)
     assert result.error == "torn zarr.json" and _tmp_files(out) == []
 
 
 def test_cancel_discards_the_file_in_progress_and_stops(model, out):
     jobs = mp4.plan(model, out)
-    results = list(mp4.export_all(model, jobs, cancelled=lambda: True))
+    results = list(mp4.export_all(jobs, cancelled=lambda: True))
     assert len(results) == 1 and results[0].error == mp4.CANCELLED
     assert not out.exists() or list(out.iterdir()) == []
 
@@ -207,7 +205,7 @@ def test_cli_exports_all_then_reports_nothing_to_do(single_plane, out, capsys):
 
 
 def test_cli_returns_1_when_a_file_fails(single_plane, out, monkeypatch, capsys):
-    monkeypatch.setattr(mp4, "_ffmpeg_command", lambda *a: ["sh", "-c", "exit 1"])
+    monkeypatch.setattr(convert, "_ffmpeg_command", lambda *a: ["sh", "-c", "exit 1"])
     assert cli_main([str(single_plane), "--out", str(out)]) == 1
     assert "FAILED" in capsys.readouterr().err
 
@@ -265,7 +263,7 @@ def test_dialog_exports_current_well_in_worker(qapp, model, out):
 
     dialog = ExportDialog(model, current_well="B2")
     assert dialog.wells.selected() == ["B2"]                       # displayed well pre-selected
-    assert dialog.out_dir.text() == "~/Downloads/videos-exp"      # shown with ~, never a full home path
+    assert dialog.out_dir.text() == "~/Downloads/mp4-exp"      # shown with ~, never a full home path
     dialog.out_dir.setText(str(out))
     assert dialog.output_path() == out
     dialog.start()
@@ -279,6 +277,35 @@ def test_dialog_exports_current_well_in_worker(qapp, model, out):
     _wait(dialog, qapp)
     assert dialog.log.toPlainText().count("frames") == 1
     assert dialog.status.text().startswith("Done: 0 file")
+
+
+def test_close_button_closes_idle_and_after_export(qapp, model, out):
+    """Regression: reject() called close(), which Qt ignores while already
+    closing, so the Close button and Esc never hid the dialog."""
+    from qtpy.QtWidgets import QPushButton
+    from record_zstack_viewer.ui.export_dialog import ExportDialog
+
+    dialog = ExportDialog(model)
+    dialog.show()
+    close = next(b for b in dialog.findChildren(QPushButton) if b.text() == "Close")
+    close.click()
+    assert not dialog.isVisible()
+
+    dialog = ExportDialog(model)
+    dialog.show()
+    dialog.out_dir.setText(str(out))
+    dialog.start()
+    _wait(dialog, qapp)
+    close = next(b for b in dialog.findChildren(QPushButton) if b.text() == "Close")
+    close.click()
+    assert not dialog.isVisible()
+
+    dialog = ExportDialog(model)                   # Esc path, with a running export
+    dialog.show()
+    dialog.out_dir.setText(str(out / "again"))
+    dialog.start()
+    dialog.reject()
+    assert not dialog.isVisible() and not dialog.is_running
 
 
 def test_worker_reference_survives_until_the_thread_exits(qapp, model, out):

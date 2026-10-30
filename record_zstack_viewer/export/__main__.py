@@ -23,7 +23,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--well", action="append", metavar="WELL",
                         help="only this well (repeatable); default: all wells")
     parser.add_argument("--out", type=Path, default=None,
-                        help="output folder (default: ~/Downloads/videos-<experiment name>)")
+                        help="output folder (default: ~/Downloads/mp4-<experiment name>)")
     parser.add_argument("--fps", type=float, default=None,
                         help="playback rate (default: real time, as recorded)")
     args = parser.parse_args(argv)
@@ -39,7 +39,7 @@ def main(argv: list[str] | None = None) -> int:
         print("nothing to export (all mp4s up to date)")
         return 0
     failures = 0
-    for result in export_all(model, jobs, fps=args.fps):
+    for result in export_all(jobs, fps=args.fps):
         failures += not result.ok
         print(result.summary(), file=sys.stdout if result.ok else sys.stderr)
     return 1 if failures else 0

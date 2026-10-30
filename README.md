@@ -39,7 +39,7 @@ UI-thread poll/tick).
 anywhere. Pick wells on the plate matrix (click, shift-click a range, drag; the
 displayed well is pre-selected), one file per recording store (`A1_fov0.mp4`,
 with `_t{t}` / `_z{z}` added for time-lapse / multi-plane runs). Output defaults
-to `~/Downloads/videos-<experiment>/`, never inside the data folder. Playback is
+to `~/Downloads/mp4-<experiment>/`, never inside the data folder. Playback is
 real time as recorded unless you set an fps. Files that are already up to date
 are skipped (delete an mp4 to regenerate it; the zarr is only ever read).
 Encoding runs in the background; live following keeps working.
