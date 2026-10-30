@@ -51,6 +51,19 @@ python -m record_zstack_viewer.export /path/to/experiment                 # all 
 python -m record_zstack_viewer.export /path/to/experiment --well A1 --out ~/videos
 ```
 
+**Same converter inside Squid.** `record_zstack_viewer/export/convert.py` is
+self-contained (numpy, tensorstore, imageio-ffmpeg only). Squid can import it,
+or copy that one file, and call it when a recording store finalizes, so a
+"save mp4s" toggle at acquisition time produces exactly the files the viewer
+would, in the same `~/Downloads/mp4-<experiment>/` folder:
+
+```python
+from record_zstack_viewer.export.convert import convert_store, default_out_dir, video_name
+
+out = default_out_dir(experiment_dir) / video_name(well, fov, t, z, n_t, n_z, partial=False)
+result = convert_store(store_dir, out)       # result.ok, result.frames, result.window, result.summary()
+```
+
 What the conversion does, and does not, change: full pixel resolution, every
 captured frame, real-time rate. An mp4 cannot hold 16-bit data, so each video
 goes through one linear 16-to-8 window, the video's own min and max, which
