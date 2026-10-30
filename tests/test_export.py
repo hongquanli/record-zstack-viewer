@@ -1,4 +1,4 @@
-"""zarr -> mp4 export: planning, encoding, partial stores, holes, cancel, CLI, dialog."""
+"""zarr -> mp4 export: planning, encoding, partial stores, holes, failures, cancel, CLI, dialog."""
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -27,6 +27,10 @@ def _decode(path: Path, h: int, w: int) -> np.ndarray:
     return np.frombuffer(out, dtype=np.uint8).reshape(-1, h, w)
 
 
+def _tmp_files(folder: Path) -> list[Path]:
+    return sorted(folder.glob("*.tmp")) if folder.exists() else []
+
+
 @pytest.fixture
 def single_plane(tmp_path):
     """2 wells x 1 FOV, Nt=1, one plane: 2 recording stores of 6 frames (64x64)."""
@@ -40,6 +44,11 @@ def model(single_plane):
     return ExperimentModel(single_plane, default_context())
 
 
+@pytest.fixture
+def out(tmp_path):
+    return tmp_path / "videos"
+
+
 # ------------------------------------------------------------------ planning
 
 def test_video_name_adds_axes_only_when_needed():
@@ -49,8 +58,7 @@ def test_video_name_adds_axes_only_when_needed():
     assert mp4.video_name("A1", 0, 1, 2, 2, 3, True) == "A1_fov0_t1_z2_partial.mp4"
 
 
-def test_plan_one_job_per_store_and_skips_up_to_date(model, tmp_path):
-    out = tmp_path / "videos"
+def test_plan_one_job_per_store_and_skips_up_to_date(model, out):
     jobs = mp4.plan(model, out)
     assert [(j.well, j.out.name) for j in jobs] == [("A1", "A1_fov0.mp4"), ("B2", "B2_fov0.mp4")]
     assert mp4.plan(model, out, wells=["B2"]) == jobs[1:]
@@ -60,76 +68,80 @@ def test_plan_one_job_per_store_and_skips_up_to_date(model, tmp_path):
     assert len(mp4.plan(model, out, overwrite=True)) == 2
 
 
-def test_plan_multi_plane_time_lapse(tiny_experiment, tmp_path):
+def test_plan_multi_plane_time_lapse(tiny_experiment, out):
     model = ExperimentModel(tiny_experiment, default_context())  # 2 wells, nt=2, 3 planes
-    names = sorted(j.out.name for j in mp4.plan(model, tmp_path))
+    names = sorted(j.out.name for j in mp4.plan(model, out))
     assert len(names) == 12
     assert names[0] == "A1_fov0_t0_z0.mp4" and names[-1] == "B2_fov0_t1_z2.mp4"
 
 
 # ------------------------------------------------------------------ encoding
 
-def test_export_writes_every_frame_at_real_time_fps(model, tmp_path):
-    job = mp4.plan(model, tmp_path)[0]
+def test_export_writes_every_frame(model, out):
+    job = mp4.plan(model, out)[0]
     result = mp4.export_job(model, job)
-    assert result.ok and result.frames == 6 and result.held == 0 and not result.partial
-    assert job.out.exists() and not job.out.with_name(job.out.name + ".tmp").exists()
+    assert result.ok and result.frames == 6 and result.held == 0
+    assert job.out.exists() and _tmp_files(out) == []
+    assert _decode(job.out, 64, 64).shape == (6, 64, 64)
 
+
+def test_contrast_is_fixed_for_the_whole_video(model, out):
+    """With explicit clims the blob (2000 counts) saturates and the noise (<300)
+    stays dark in every frame: no per-frame renormalisation."""
+    job = mp4.plan(model, out)[0]
+    assert mp4.export_job(model, job, clims=(0.0, 1000.0)).ok
     frames = _decode(job.out, 64, 64)
-    assert frames.shape == (6, 64, 64)
-    # fixed contrast: the bright blob stays bright in every frame, frames differ in the noise
-    assert frames.max() > 200 and (frames[0] != frames[1]).any()
-
-    probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
-                            "-show_entries", "stream=r_frame_rate", "-of", "json", str(job.out)],
-                           capture_output=True, text=True)
-    if probe.returncode == 0:  # ffprobe is not shipped by imageio-ffmpeg; check when present
-        assert json.loads(probe.stdout)["streams"][0]["r_frame_rate"] == "15/1"
+    blob, corner = frames[:, 26, 26], frames[:, 0, 0]       # blob centre is at 40 % of 64
+    assert (blob > 245).all() and (corner < 90).all()
 
 
-def test_default_fps_prefers_effective_fps(model):
-    source = model.open_fov("A1", 0).recording
-    assert mp4.default_fps(source) == 15.0            # from time_increment_s = 1/15
-    source.metadata.effective_fps = 9.5
-    assert mp4.default_fps(source) == 9.5
+def test_real_time_fps_reaches_ffmpeg(model, out, monkeypatch):
+    seen = []
+    real = mp4._ffmpeg_command
+    monkeypatch.setattr(mp4, "_ffmpeg_command", lambda w, h, fps, o: seen.append(fps) or real(w, h, fps, o))
+    job = mp4.plan(model, out)[0]
+    assert mp4.export_job(model, job).ok and seen == [15.0]          # fixture: 1/15 s per frame
+    assert mp4.export_job(model, job, fps=2.5).ok and seen[-1] == 2.5
 
 
-def test_partial_store_exports_captured_frames(tmp_path):
+def test_default_fps_prefers_effective_fps(single_plane):
+    store = single_plane / "recording" / "t0" / "A1" / "fov_0.ome.zarr"
+    meta = json.loads((store / "zarr.json").read_text())
+    meta["attributes"]["_squid"]["effective_fps"] = 9.5
+    (store / "zarr.json").write_text(json.dumps(meta))
+    source = ExperimentModel(single_plane, default_context()).open_fov("A1", 0).recording
+    assert source.metadata.effective_fps == 9.5 and mp4.default_fps(source) == 9.5
+
+
+def test_partial_store_exports_captured_frames(tmp_path, out):
     root = generate_experiment(tmp_path / "exp", wells=["A1"], fovs_per_well=1, nt=1,
                                recording_frames=6, recording_planes=1,
                                zstack_channels=[("DAPI", "#4a9eff")], zstack_nz=2, complete=False)
     model = ExperimentModel(root, default_context())
-    assert mp4.plan(model, tmp_path / "v") == []       # run still going: left alone
+    assert mp4.plan(model, out) == []                  # run still going: left alone
     (root / ".done").write_text("")                    # aborted run: .done without completion
-    (job,) = mp4.plan(model, tmp_path / "v")
+    (job,) = mp4.plan(model, out)
     assert job.out.name == "A1_fov0_partial.mp4"
     result = mp4.export_job(model, job)
-    assert result.ok and result.partial and result.frames == 3
+    assert result.ok and result.frames == 3
 
 
-def test_unwritten_slot_repeats_previous_frame(model, tmp_path):
+def test_unwritten_slot_repeats_previous_frame(model, out):
     store = model.open_fov("A1", 0).recording.store_path(0, 0)
     shutil.rmtree(store / "c" / "3")                   # frame 3 was never written
-    job = mp4.plan(model, tmp_path)[0]
+    job = mp4.plan(model, out)[0]
     result = mp4.export_job(model, job)
     assert result.ok and result.held == 1 and result.frames == 6
     frames = _decode(job.out, 64, 64)
     assert np.abs(frames[3].astype(int) - frames[2].astype(int)).mean() < 1.0
 
 
-def test_cancel_stops_after_current_file_and_leaves_no_tmp(model, tmp_path):
-    jobs = mp4.plan(model, tmp_path / "v")
-    results = list(mp4.export_all(model, jobs, cancelled=lambda: True))
-    assert len(results) == 1 and results[0].error == "cancelled"
-    assert list((tmp_path / "v").glob("*")) == []
-
-
-def test_odd_frame_size_is_cropped_even(tmp_path):
+def test_odd_frame_size_is_cropped_even(tmp_path, out):
     root = generate_experiment(tmp_path / "exp", wells=["A1"], fovs_per_well=1, nt=1,
                                recording_frames=2, recording_planes=1,
                                zstack_channels=[("DAPI", "#4a9eff")], zstack_nz=1, hw=(33, 65))
     model = ExperimentModel(root, default_context())
-    job = mp4.plan(model, tmp_path / "v")[0]
+    job = mp4.plan(model, out)[0]
     assert mp4.export_job(model, job).ok
     assert _decode(job.out, 32, 64).shape == (2, 32, 64)
 
@@ -143,6 +155,34 @@ def test_oversized_frames_are_downscaled(monkeypatch):
     assert cmd[cmd.index("-vf") + 1] == "scale=-2:32"
 
 
+# ------------------------------------------------------------- failure paths
+
+def test_ffmpeg_failure_is_reported_and_leaves_no_tmp(model, out, monkeypatch):
+    monkeypatch.setattr(mp4, "_ffmpeg_command", lambda w, h, fps, o: ["sh", "-c", "echo boom >&2; exit 3"])
+    job = mp4.plan(model, out)[0]
+    result = mp4.export_job(model, job)
+    assert not result.ok and "boom" in result.error
+    assert not job.out.exists() and _tmp_files(out) == []
+
+
+def test_read_error_is_reported_and_leaves_no_tmp(model, out, monkeypatch):
+    from record_zstack_viewer.reader.zarr_v3 import RecordingFovSource
+
+    def broken(self, index):
+        raise OSError("torn zarr.json")
+    monkeypatch.setattr(RecordingFovSource, "read_plane", broken)
+    job = mp4.plan(model, out)[0]
+    result = mp4.export_job(model, job)
+    assert result.error == "torn zarr.json" and _tmp_files(out) == []
+
+
+def test_cancel_discards_the_file_in_progress_and_stops(model, out):
+    jobs = mp4.plan(model, out)
+    results = list(mp4.export_all(model, jobs, cancelled=lambda: True))
+    assert len(results) == 1 and results[0].error == mp4.CANCELLED
+    assert not out.exists() or list(out.iterdir()) == []
+
+
 # ----------------------------------------------------------------------- CLI
 
 def test_cli_exports_all_then_reports_nothing_to_do(single_plane, capsys):
@@ -150,6 +190,12 @@ def test_cli_exports_all_then_reports_nothing_to_do(single_plane, capsys):
     assert sorted(p.name for p in (single_plane / "videos").iterdir()) == ["A1_fov0.mp4", "B2_fov0.mp4"]
     assert cli_main([str(single_plane)]) == 0
     assert "nothing to export" in capsys.readouterr().out
+
+
+def test_cli_returns_1_when_a_file_fails(single_plane, monkeypatch, capsys):
+    monkeypatch.setattr(mp4, "_ffmpeg_command", lambda w, h, fps, o: ["sh", "-c", "exit 1"])
+    assert cli_main([str(single_plane)]) == 1
+    assert "FAILED" in capsys.readouterr().err
 
 
 # -------------------------------------------------------------------- dialog
@@ -160,27 +206,61 @@ def qapp():
     yield QApplication.instance() or QApplication([])
 
 
-def test_dialog_exports_current_well_in_worker(qapp, model, tmp_path, monkeypatch):
+@pytest.fixture(autouse=True)
+def _no_real_settings(monkeypatch):
+    """Keep the tests' folders out of the user's remembered output folder."""
     from qtpy.QtCore import QSettings
-    monkeypatch.setattr(QSettings, "setValue", lambda self, *a: None)   # keep the test's folder out of real settings
+    monkeypatch.setattr(QSettings, "setValue", lambda self, *a: None)
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **k: default)
+
+
+def _wait(dialog, qapp, timeout_ms=30_000) -> None:
+    """Run the event loop until the worker has finished and its signals landed."""
+    from qtpy.QtCore import QDeadlineTimer
+    deadline = QDeadlineTimer(timeout_ms)
+    while dialog.worker is not None and not deadline.hasExpired():
+        qapp.processEvents()
+    assert dialog.worker is None, "export did not finish"
+
+
+def test_dialog_exports_current_well_in_worker(qapp, model, out):
     from record_zstack_viewer.ui.export_dialog import ExportDialog
 
     dialog = ExportDialog(model, current_well="B2")
-    assert dialog.scope.currentData() == "B2"
-    dialog.out_dir.setText(str(tmp_path / "v"))
+    assert dialog.scope.currentData() == "B2" and dialog.out_dir.text().endswith("videos")
+    dialog.out_dir.setText(str(out))
     dialog.start()
-    assert dialog.worker is not None and dialog.worker.wait(30_000)
-    qapp.processEvents()
-    assert sorted(p.name for p in (tmp_path / "v").iterdir()) == ["B2_fov0.mp4"]
+    _wait(dialog, qapp)
+    assert sorted(p.name for p in out.iterdir()) == ["B2_fov0.mp4"]
     assert "B2_fov0.mp4: 6 frames" in dialog.log.toPlainText()
     assert dialog.status.text().startswith("Done: 1 file")
     assert dialog.start_button.isEnabled() and not dialog.cancel_button.isEnabled()
 
+    dialog.start()                                     # second run: nothing left to do
+    _wait(dialog, qapp)
+    assert dialog.log.toPlainText().count("frames") == 1
+    assert dialog.status.text().startswith("Done: 0 file")
 
-def test_main_window_has_export_button(qapp, single_plane):
+
+def test_dialog_reports_a_planning_error_and_recovers(qapp, model, out, monkeypatch):
+    from record_zstack_viewer.ui import export_dialog
+
+    def broken(*a, **k):
+        raise OSError("unreadable store")
+    monkeypatch.setattr(export_dialog, "plan", broken)
+    dialog = export_dialog.ExportDialog(model)
+    dialog.out_dir.setText(str(out))
+    dialog.start()
+    _wait(dialog, qapp)
+    assert "unreadable store" in dialog.log.toPlainText()
+    assert dialog.start_button.isEnabled()
+
+
+def test_main_window_reuses_one_export_dialog(qapp, single_plane):
     from record_zstack_viewer.ui.app import MainWindow
     win = MainWindow(single_plane)
-    dialog = win.open_export_dialog()
-    assert dialog.scope.count() == 1                   # nothing displayed yet: all wells only
-    dialog.close()
+    first = win.open_export_dialog()
+    assert first.scope.count() == 1                   # nothing displayed yet: all wells only
+    second = win.open_export_dialog()                 # idle dialog is replaced, not stacked
+    assert second is not first and win._export_dialog is second
     win.close()

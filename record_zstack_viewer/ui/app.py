@@ -73,6 +73,7 @@ class MainWindow(QMainWindow):
         self._mode: str = _MODES[0]
         self._displayed: tuple[str, int] | None = None
         self._datasets: FovDatasets | None = None
+        self._export_dialog: ExportDialog | None = None
 
         # -- central: coverage header + mode toggle above the FovViewer -------
         self.coverage_label = QLabel("", self)
@@ -158,11 +159,20 @@ class MainWindow(QMainWindow):
             self.viewer.set_timepoint(t)
 
     def open_export_dialog(self) -> ExportDialog:
-        """Open the zarr -> mp4 export dialog for this experiment (non-modal)."""
+        """Open the zarr -> mp4 export dialog for this experiment (non-modal).
+
+        One dialog per window: a running export is brought to the front rather
+        than started twice (two exports would write the same files)."""
+        if self._export_dialog is not None and self._export_dialog.is_running:
+            self._export_dialog.raise_()
+            self._export_dialog.activateWindow()
+            return self._export_dialog
+        if self._export_dialog is not None:
+            self._export_dialog.close()
         well = self._displayed[0] if self._displayed is not None else None
-        dialog = ExportDialog(self._model, current_well=well, parent=self)
-        dialog.show()
-        return dialog
+        self._export_dialog = ExportDialog(self._model, current_well=well, parent=self)
+        self._export_dialog.show()
+        return self._export_dialog
 
     # ------------------------------- selection -------------------------------
 
@@ -303,6 +313,6 @@ class MainWindow(QMainWindow):
         # closed window never ticks. The subsequent `destroyed` signal lets the
         # ViewerController deregister this window from its registry.
         self._live_timer.stop()
-        for dialog in self.findChildren(ExportDialog):   # stop a running export cleanly
-            dialog.close()
+        if self._export_dialog is not None:              # stops a running export cleanly
+            self._export_dialog.close()
         super().closeEvent(event)
