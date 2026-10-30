@@ -34,6 +34,8 @@ class FovMetadata:
     plane_z_offsets: list[float] | None = None
     # (x, y, z) stage placement in um from the OME `translation`; None when absent (old data)
     position_um: tuple[float, float, float] | None = None
+    # the rate squid actually recorded at (`_squid.effective_fps`); None when absent
+    effective_fps: float | None = None
 
 
 def read_store_zarr_json(store_dir: Path) -> dict:
@@ -87,6 +89,7 @@ def fov_metadata_from_attrs(attrs: dict) -> FovMetadata:
         aborted=bool(squid.get("aborted", False)),
         n_planes=int(squid.get("n_planes", 1)),
         position_um=position,
+        effective_fps=float(squid["effective_fps"]) if squid.get("effective_fps") else None,
     )
 
 

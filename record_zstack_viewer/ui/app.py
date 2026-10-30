@@ -34,6 +34,7 @@ from record_zstack_viewer.cache.thumbnails import ThumbnailCache
 from record_zstack_viewer.live.engine import LiveEngine
 from record_zstack_viewer.model.experiment import ExperimentModel
 from record_zstack_viewer.reader.adapter import FovDatasets
+from record_zstack_viewer.ui.export_dialog import ExportDialog
 from record_zstack_viewer.ui.fov_viewer import FovViewer
 from record_zstack_viewer.ui.plate_navigator import PlateNavigator
 
@@ -85,6 +86,9 @@ class MainWindow(QMainWindow):
             btn.clicked.connect(lambda _=False, m=mode: self.set_mode(m))
             self.mode_buttons[mode] = btn
             bar.addWidget(btn)
+        self.export_button = QPushButton("Export mp4…", self)
+        self.export_button.clicked.connect(self.open_export_dialog)
+        bar.addWidget(self.export_button)
         central = QWidget(self)
         layout = QVBoxLayout(central)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -152,6 +156,13 @@ class MainWindow(QMainWindow):
             t = self.viewer.timepoint              # acq_t selector is shared
             self.viewer.set_datasets(self._datasets, mode)
             self.viewer.set_timepoint(t)
+
+    def open_export_dialog(self) -> ExportDialog:
+        """Open the zarr -> mp4 export dialog for this experiment (non-modal)."""
+        well = self._displayed[0] if self._displayed is not None else None
+        dialog = ExportDialog(self._model, current_well=well, parent=self)
+        dialog.show()
+        return dialog
 
     # ------------------------------- selection -------------------------------
 
@@ -292,4 +303,6 @@ class MainWindow(QMainWindow):
         # closed window never ticks. The subsequent `destroyed` signal lets the
         # ViewerController deregister this window from its registry.
         self._live_timer.stop()
+        for dialog in self.findChildren(ExportDialog):   # stop a running export cleanly
+            dialog.close()
         super().closeEvent(event)

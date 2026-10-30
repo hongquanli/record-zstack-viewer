@@ -33,6 +33,30 @@ The path is the experiment root (the directory holding `recording/` and/or
 `zarr/`). Each window follows a growing acquisition automatically (a ~1 s
 UI-thread poll/tick).
 
+## Export recordings to mp4
+
+**Export mp4…** (top bar) converts recordings to H.264 mp4 files that play
+anywhere: the displayed well or all wells, one file per recording store
+(`A1_fov0.mp4`, with `_t{t}` / `_z{z}` added for time-lapse / multi-plane runs).
+Default output is `{experiment}/videos/` (changeable, remembered). Playback is
+real time as recorded unless you set an fps. Files that are already up to date
+are skipped. Encoding runs in the background; live following keeps working.
+
+The same thing from a shell, no Qt needed:
+
+```bash
+python -m record_zstack_viewer.export /path/to/experiment                 # all wells
+python -m record_zstack_viewer.export /path/to/experiment --well A1 --out ~/videos
+```
+
+Details: contrast is fixed for the whole video (1–99.9 percentile of sampled
+frames, the viewer's own first-display rule). A store that never completed
+exports its captured frames as `…_partial.mp4`; a frame slot the camera never
+delivered repeats the previous frame instead of flashing black (reported as
+"held"). Frames stream one at a time through ffmpeg (from the `imageio-ffmpeg`
+wheel), so memory does not grow with video length. Odd sizes are cropped to
+even; sides over 4096 px are downscaled to fit the H.264 decoder limit.
+
 ## Launcher & desktop shortcut
 
 Launched with **no path**, the app opens a small **launcher**: drop a Squid
