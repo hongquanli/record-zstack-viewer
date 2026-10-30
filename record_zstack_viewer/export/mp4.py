@@ -53,8 +53,8 @@ class ExportResult:
 # ------------------------------------------------------------------ planning
 
 def default_out_dir(experiment_root: Path) -> Path:
-    """`~/Downloads/<experiment name>/`: outside the data folder, one folder per run."""
-    return Path.home() / "Downloads" / Path(experiment_root).name
+    """`~/Downloads/videos-<experiment name>/`: outside the data folder, one folder per run."""
+    return Path.home() / "Downloads" / f"videos-{Path(experiment_root).name}"
 
 
 def video_name(well: str, fov: int, acq_t: int, z: int, n_t: int, n_z: int,

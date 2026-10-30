@@ -3,20 +3,22 @@
 Planning and encoding both run on a `QThread` so the window and its live
 following stay responsive; one file at a time (`export_all`). Cancel stops at
 the next frame and discards the file in progress. Output defaults to
-`~/Downloads/<experiment name>/`; paths are shown with `~` for the home folder.
+`~/Downloads/videos-<experiment name>/`; paths are shown with `~` for home.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
 from qtpy.QtCore import Qt, QThread, Signal  # type: ignore[attr-defined]
-from qtpy.QtWidgets import (QCheckBox, QDialog, QDoubleSpinBox, QFileDialog,
-                            QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-                            QListWidget, QListWidgetItem, QPlainTextEdit,
-                            QProgressBar, QPushButton, QVBoxLayout, QWidget)
+from qtpy.QtGui import QColor
+from qtpy.QtWidgets import (QAbstractItemView, QCheckBox, QDialog, QDoubleSpinBox,
+                            QFileDialog, QFormLayout, QHBoxLayout, QLabel,
+                            QLineEdit, QPlainTextEdit, QProgressBar, QPushButton,
+                            QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from record_zstack_viewer.export.mp4 import CANCELLED, ExportResult, default_out_dir, export_all, plan
 from record_zstack_viewer.model.experiment import ExperimentModel
+from record_zstack_viewer.model.geometry import PLATE_FORMATS, well_name_to_rc
 
 
 def _short(path: Path) -> str:
@@ -61,38 +63,100 @@ class ExportWorker(QThread):
         self.finished_all.emit(written, "")
 
 
-class WellSelector(QWidget):
-    """A checkable list of the experiment's wells with All / None buttons.
-    `selected()` is the checked wells in plate order."""
+_CELL_PX = (10, 26)        # min / max side of a plate cell
+_GRID_WIDTH_PX = 480       # the matrix fits this width for every plate format
 
-    def __init__(self, wells: list[str], checked: set[str], parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.list = QListWidget(self)
-        self.list.setMaximumHeight(140)
-        for well in wells:
-            item = QListWidgetItem(well, self.list)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked if well in checked else Qt.Unchecked)
-        all_btn = QPushButton("All", self)
-        none_btn = QPushButton("None", self)
-        all_btn.clicked.connect(lambda: self._set_all(Qt.Checked))
-        none_btn.clicked.connect(lambda: self._set_all(Qt.Unchecked))
-        buttons = QHBoxLayout()
-        buttons.addWidget(all_btn)
-        buttons.addWidget(none_btn)
-        buttons.addStretch(1)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.list)
-        layout.addLayout(buttons)
 
-    def _set_all(self, state) -> None:
-        for i in range(self.list.count()):
-            self.list.item(i).setCheckState(state)
+def grid_shape(wells: list[str], plate_format: str) -> tuple[int, int, list[str]]:
+    """`(rows, cols, other)` for the plate matrix.
+
+    Rows/cols come from the known plate format, else from the smallest standard
+    plate (6 … 1536) that holds every well present, else from the wells alone.
+    `other` lists region ids that are not well names (a "Current Position" run).
+    """
+    rc, other = [], []
+    for name in wells:
+        try:
+            rc.append(well_name_to_rc(name))
+        except ValueError:
+            other.append(name)
+    if plate_format in PLATE_FORMATS:
+        fmt = PLATE_FORMATS[plate_format]
+        return fmt.rows, fmt.cols, other
+    need_r = 1 + max((r for r, _ in rc), default=0)
+    need_c = 1 + max((c for _, c in rc), default=0)
+    for fmt in PLATE_FORMATS.values():  # ordered small to large
+        if fmt.rows >= need_r and fmt.cols >= need_c:
+            return fmt.rows, fmt.cols, other
+    return need_r, need_c, other
+
+
+class WellSelector(QTableWidget):
+    """The plate as a clickable matrix: click, shift-click a rectangle, drag,
+    ctrl/cmd-click to add. Wells absent from the experiment are greyed and
+    cannot be selected. Non-well regions get an extra bottom row. `selected()`
+    returns the selected region names in plate order."""
+
+    def __init__(self, wells: list[str], plate_format: str, selected: set[str],
+                 parent: QWidget | None = None) -> None:
+        rows, cols, other = grid_shape(wells, plate_format)
+        super().__init__(rows + bool(other), max(cols, len(other)), parent)
+        self._name: dict[tuple[int, int], str] = {}
+        present = set(wells)
+        for r in range(rows):
+            for c in range(cols):
+                self._name[(r, c)] = f"{_row_label(r)}{c + 1}"
+        for i, name in enumerate(other):
+            self._name[(rows, i)] = name
+        for r in range(self.rowCount()):
+            for c in range(self.columnCount()):
+                item = QTableWidgetItem()
+                name = self._name.get((r, c))
+                if name in present:
+                    item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                    item.setToolTip(name)
+                else:
+                    item.setFlags(Qt.NoItemFlags)
+                    item.setBackground(QColor(235, 235, 235))
+                self.setItem(r, c, item)
+                if r == rows and c < len(other):
+                    item.setText(name)
+        self.setHorizontalHeaderLabels([str(c + 1) for c in range(self.columnCount())])
+        self.setVerticalHeaderLabels([_row_label(r) for r in range(rows)] + (["other"] if other else []))
+
+        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.setSelectionBehavior(QAbstractItemView.SelectItems)
+        self.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        side = max(_CELL_PX[0], min(_CELL_PX[1], _GRID_WIDTH_PX // self.columnCount()))
+        self.horizontalHeader().setDefaultSectionSize(side)
+        self.verticalHeader().setDefaultSectionSize(side)
+        self.horizontalHeader().setMinimumSectionSize(side)
+        self.verticalHeader().setMinimumSectionSize(side)
+        font = self.font()
+        font.setPointSize(7 if self.columnCount() > 24 else 9)
+        self.horizontalHeader().setFont(font)
+        self.verticalHeader().setFont(font)
+        self.setFixedSize(self.verticalHeader().width() + side * self.columnCount() + 2,
+                          self.horizontalHeader().height() + side * self.rowCount() + 2)
+        for (r, c), name in self._name.items():
+            if name in selected:
+                self.item(r, c).setSelected(True)
 
     def selected(self) -> list[str]:
-        return [self.list.item(i).text() for i in range(self.list.count())
-                if self.list.item(i).checkState() == Qt.Checked]
+        cells = sorted((i.row(), i.column()) for i in self.selectedItems())
+        return [self._name[rc] for rc in cells]
+
+
+def _row_label(r: int) -> str:
+    """0 -> A, 25 -> Z, 26 -> AA (the inverse of `well_name_to_rc`)."""
+    label = ""
+    r += 1
+    while r:
+        r, rem = divmod(r - 1, 26)
+        label = chr(ord("A") + rem) + label
+    return label
 
 
 class ExportDialog(QDialog):
@@ -108,7 +172,20 @@ class ExportDialog(QDialog):
         self.setMinimumWidth(520)
 
         wells = model.wells()
-        self.wells = WellSelector(wells, {current_well} if current_well in wells else set(wells), self)
+        self.wells = WellSelector(wells, model.plate_format(),
+                                  {current_well} if current_well in wells else set(wells), self)
+        all_btn = QPushButton("All", self)
+        none_btn = QPushButton("None", self)
+        all_btn.clicked.connect(self.wells.selectAll)
+        none_btn.clicked.connect(self.wells.clearSelection)
+        wells_box = QVBoxLayout()
+        wells_box.addWidget(self.wells)
+        well_buttons = QHBoxLayout()
+        well_buttons.addWidget(all_btn)
+        well_buttons.addWidget(none_btn)
+        well_buttons.addWidget(QLabel("click · shift-click a range · drag", self))
+        well_buttons.addStretch(1)
+        wells_box.addLayout(well_buttons)
 
         self.out_dir = QLineEdit(_short(default_out_dir(model.root)), self)
         browse = QPushButton("Browse…", self)
@@ -122,7 +199,7 @@ class ExportDialog(QDialog):
         self.fps.setDecimals(2)
         self.fps.setSpecialValueText("real time (as recorded)")
         self.fps.setValue(0.0)
-        self.overwrite = QCheckBox("Re-export files that already exist", self)
+        self.overwrite = QCheckBox("Overwrite existing", self)
 
         self.progress = QProgressBar(self)
         self.progress.setFormat("%v / %m files")
@@ -145,7 +222,7 @@ class ExportDialog(QDialog):
         buttons.addWidget(close)
 
         form = QFormLayout(self)
-        form.addRow("Wells", self.wells)
+        form.addRow("Wells", wells_box)
         form.addRow("Output folder", out_row)
         form.addRow("Playback fps", self.fps)
         form.addRow("", self.overwrite)

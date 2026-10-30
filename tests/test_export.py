@@ -11,6 +11,7 @@ from pathlib import Path
 import imageio_ffmpeg
 import numpy as np
 import pytest
+from qtpy.QtCore import Qt
 
 from record_zstack_viewer.cache.memory import default_context
 from record_zstack_viewer.export import mp4
@@ -207,7 +208,7 @@ def qapp():
 
 
 def test_default_out_dir_is_downloads_per_experiment(tmp_path):
-    assert mp4.default_out_dir(tmp_path / "2026-10-30_run") == Path.home() / "Downloads" / "2026-10-30_run"
+    assert mp4.default_out_dir(tmp_path / "2026-10-30_run") == Path.home() / "Downloads" / "videos-2026-10-30_run"
 
 
 def _wait(dialog, qapp, timeout_ms=30_000) -> None:
@@ -224,7 +225,7 @@ def test_dialog_exports_current_well_in_worker(qapp, model, out):
 
     dialog = ExportDialog(model, current_well="B2")
     assert dialog.wells.selected() == ["B2"]                       # displayed well pre-selected
-    assert dialog.out_dir.text() == "~/Downloads/exp"             # shown with ~, never a full home path
+    assert dialog.out_dir.text() == "~/Downloads/videos-exp"      # shown with ~, never a full home path
     dialog.out_dir.setText(str(out))
     assert dialog.output_path() == out
     dialog.start()
@@ -240,18 +241,46 @@ def test_dialog_exports_current_well_in_worker(qapp, model, out):
     assert dialog.status.text().startswith("Done: 0 file")
 
 
-def test_well_selector_all_none_and_empty_selection(qapp, model, out):
-    from qtpy.QtCore import Qt
+def test_grid_shape_uses_the_format_else_the_smallest_plate_that_fits():
+    from record_zstack_viewer.ui.export_dialog import grid_shape
+    assert grid_shape(["A1", "B2"], "unknown") == (2, 3, [])            # fits a 6-well
+    assert grid_shape(["A1", "D6"], "unknown") == (4, 6, [])            # 24-well
+    assert grid_shape(["A1", "H12"], "unknown") == (8, 12, [])          # 96-well
+    assert grid_shape(["A1"], "384") == (16, 24, [])                    # known format wins
+    assert grid_shape(["A1", "current"], "unknown") == (2, 3, ["current"])  # non-well id listed apart
+
+
+def test_well_selector_is_a_plate_matrix(qapp, model):
+    """Present wells are selectable, absent wells are not; a rectangle (what a
+    shift-click does) only picks up present wells; All/None work."""
+    from qtpy.QtWidgets import QTableWidgetSelectionRange
     from record_zstack_viewer.ui.export_dialog import ExportDialog
 
-    dialog = ExportDialog(model)                                   # nothing displayed: all wells
-    assert dialog.wells.selected() == ["A1", "B2"]
-    dialog.wells._set_all(Qt.Unchecked)
+    dialog = ExportDialog(model)                       # A1 and B2; fixture spacing 9 mm -> 96-well
+    sel = dialog.wells
+    assert (sel.rowCount(), sel.columnCount()) == (8, 12)
+    assert sel.selected() == ["A1", "B2"]                          # nothing displayed: all present wells
+    assert sel.item(0, 1).flags() == Qt.NoItemFlags                # A2 absent: greyed, unselectable
+    sel.clearSelection()
+    assert sel.selected() == []
+    sel.setRangeSelected(QTableWidgetSelectionRange(0, 0, 7, 11), True)  # whole plate rectangle
+    assert sel.selected() == ["A1", "B2"]
+    sel.clearSelection()
+    sel.item(1, 1).setSelected(True)
+    assert sel.selected() == ["B2"]
+    sel.selectAll()
+    assert sel.selected() == ["A1", "B2"]
+
+
+def test_empty_selection_is_refused_and_subset_exports(qapp, model, out):
+    from record_zstack_viewer.ui.export_dialog import ExportDialog
+
+    dialog = ExportDialog(model)
+    dialog.wells.clearSelection()
     dialog.out_dir.setText(str(out))
     dialog.start()
     assert dialog.worker is None and dialog.status.text() == "Select at least one well."
-    dialog.wells._set_all(Qt.Checked)
-    dialog.wells.list.item(0).setCheckState(Qt.Unchecked)
+    dialog.wells.item(1, 1).setSelected(True)                      # B2 only
     dialog.start()
     _wait(dialog, qapp)
     assert sorted(p.name for p in out.iterdir()) == ["B2_fov0.mp4"]

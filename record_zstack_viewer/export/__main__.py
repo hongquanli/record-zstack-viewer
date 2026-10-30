@@ -23,7 +23,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--well", action="append", metavar="WELL",
                         help="only this well (repeatable); default: all wells")
     parser.add_argument("--out", type=Path, default=None,
-                        help="output folder (default: ~/Downloads/<experiment name>)")
+                        help="output folder (default: ~/Downloads/videos-<experiment name>)")
     parser.add_argument("--fps", type=float, default=None,
                         help="playback rate (default: real time, as recorded)")
     parser.add_argument("--overwrite", action="store_true", help="re-export existing mp4s")
