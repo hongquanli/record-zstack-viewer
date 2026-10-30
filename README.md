@@ -39,8 +39,13 @@ UI-thread poll/tick).
 anywhere. Pick wells on the plate matrix (click, shift-click a range, drag; the
 displayed well is pre-selected), one file per recording store (`A1_fov0.mp4`,
 with `_t{t}` / `_z{z}` added for time-lapse / multi-plane runs). Output defaults
-to `~/Downloads/videos-<experiment>/`, never inside the data folder. Playback is real time as recorded unless you set
-an fps. Files that are already up to date are skipped. Encoding runs in the
+to `~/Downloads/videos-<experiment>/`, never inside the data folder. When wells
+hold several FOVs, a second matrix picks the FOV indices. Contrast defaults to
+what you see on screen when a recording is displayed (one window for every
+selected well), else to an automatic percentile per video. The dialog shows the
+output frame size; frames over 4096 px are downscaled to play anywhere unless
+you tick full resolution. Playback is real time as recorded unless you set an
+fps. Files that are already up to date are skipped. Encoding runs in the
 background; live following keeps working.
 
 The same thing from a shell, no Qt needed:

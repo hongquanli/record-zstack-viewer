@@ -170,7 +170,8 @@ class MainWindow(QMainWindow):
         if self._export_dialog is not None:
             self._export_dialog.close()
         well = self._displayed[0] if self._displayed is not None else None
-        self._export_dialog = ExportDialog(self._model, current_well=well, parent=self)
+        self._export_dialog = ExportDialog(self._model, current_well=well,
+                                           screen_clims=self.viewer.current_clims(), parent=self)
         self._export_dialog.show()
         return self._export_dialog
 

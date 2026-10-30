@@ -99,7 +99,8 @@ def test_contrast_is_fixed_for_the_whole_video(model, out):
 def test_real_time_fps_reaches_ffmpeg(model, out, monkeypatch):
     seen = []
     real = mp4._ffmpeg_command
-    monkeypatch.setattr(mp4, "_ffmpeg_command", lambda w, h, fps, o: seen.append(fps) or real(w, h, fps, o))
+    monkeypatch.setattr(mp4, "_ffmpeg_command",
+                        lambda w, h, fps, o, *a: seen.append(fps) or real(w, h, fps, o, *a))
     job = mp4.plan(model, out)[0]
     assert mp4.export_job(model, job).ok and seen == [15.0]          # fixture: 1/15 s per frame
     assert mp4.export_job(model, job, fps=2.5).ok and seen[-1] == 2.5
@@ -147,19 +148,28 @@ def test_odd_frame_size_is_cropped_even(tmp_path, out):
     assert _decode(job.out, 32, 64).shape == (2, 32, 64)
 
 
-def test_oversized_frames_are_downscaled(monkeypatch):
-    monkeypatch.setattr(mp4, "MAX_SIDE_PX", 32)
-    assert "-vf" not in mp4._ffmpeg_command(32, 20, 10.0, Path("x.mp4"))
-    cmd = mp4._ffmpeg_command(64, 40, 10.0, Path("x.mp4"))
-    assert cmd[cmd.index("-vf") + 1] == "scale=32:-2"
-    cmd = mp4._ffmpeg_command(40, 64, 10.0, Path("x.mp4"))
-    assert cmd[cmd.index("-vf") + 1] == "scale=-2:32"
+def test_output_size_even_and_capped():
+    assert mp4.output_size(3112, 2084) == (3112, 2084)             # under the cap: untouched
+    assert mp4.output_size(6224, 4168) == (4096, 2742)             # 1x1-binned ToupTek, aspect kept
+    assert mp4.output_size(6224, 4168, max_side=None) == (6224, 4168)
+    assert mp4.output_size(33, 65, max_side=None) == (32, 64)      # odd sides cropped
+    assert "-vf" not in mp4._ffmpeg_command(32, 20, 10.0, Path("x.mp4"), max_side=32)
+    cmd = mp4._ffmpeg_command(64, 40, 10.0, Path("x.mp4"), max_side=32)
+    assert cmd[cmd.index("-vf") + 1] == "scale=32:20"
+
+
+def test_export_downscales_to_max_side_unless_full_res(model, out):
+    job = mp4.plan(model, out)[0]
+    assert mp4.export_job(model, job, max_side=32).ok
+    assert _decode(job.out, 32, 32).shape == (6, 32, 32)
+    assert mp4.export_job(model, job, max_side=None).ok
+    assert _decode(job.out, 64, 64).shape == (6, 64, 64)
 
 
 # ------------------------------------------------------------- failure paths
 
 def test_ffmpeg_failure_is_reported_and_leaves_no_tmp(model, out, monkeypatch):
-    monkeypatch.setattr(mp4, "_ffmpeg_command", lambda w, h, fps, o: ["sh", "-c", "echo boom >&2; exit 3"])
+    monkeypatch.setattr(mp4, "_ffmpeg_command", lambda *a: ["sh", "-c", "echo boom >&2; exit 3"])
     job = mp4.plan(model, out)[0]
     result = mp4.export_job(model, job)
     assert not result.ok and "boom" in result.error
@@ -194,7 +204,7 @@ def test_cli_exports_all_then_reports_nothing_to_do(single_plane, out, capsys):
 
 
 def test_cli_returns_1_when_a_file_fails(single_plane, out, monkeypatch, capsys):
-    monkeypatch.setattr(mp4, "_ffmpeg_command", lambda w, h, fps, o: ["sh", "-c", "exit 1"])
+    monkeypatch.setattr(mp4, "_ffmpeg_command", lambda *a: ["sh", "-c", "exit 1"])
     assert cli_main([str(single_plane), "--out", str(out)]) == 1
     assert "FAILED" in capsys.readouterr().err
 
@@ -227,7 +237,7 @@ def test_dialog_exports_current_well_in_worker(qapp, model, out):
     assert dialog.wells.selected() == ["B2"]                       # displayed well pre-selected
     assert dialog.out_dir.text() == "~/Downloads/videos-exp"      # shown with ~, never a full home path
     dialog.out_dir.setText(str(out))
-    assert dialog.output_path() == out
+    assert dialog.options().out_dir == out
     dialog.start()
     _wait(dialog, qapp)
     assert sorted(p.name for p in out.iterdir()) == ["B2_fov0.mp4"]
@@ -284,6 +294,52 @@ def test_empty_selection_is_refused_and_subset_exports(qapp, model, out):
     dialog.start()
     _wait(dialog, qapp)
     assert sorted(p.name for p in out.iterdir()) == ["B2_fov0.mp4"]
+
+
+def test_dialog_options_contrast_resolution_and_fovs(qapp, model, out, tmp_path, monkeypatch):
+    from record_zstack_viewer.ui import export_dialog
+    from record_zstack_viewer.ui.export_dialog import ExportDialog
+
+    # on-screen contrast is the default when given; auto otherwise
+    d = ExportDialog(model, current_well="A1", screen_clims=(100.0, 2000.0))
+    assert d.contrast.currentData() == (100.0, 2000.0) and d.contrast.count() == 2
+    assert ExportDialog(model).contrast.currentData() is None
+    assert d.fovs is None                                          # one FOV per well: no FOV row
+    assert d.resolution.text() == "64 × 64" and d.full_res.isHidden()
+
+    # frames over the cap: shown as downscaled, full_res restores them
+    monkeypatch.setattr(export_dialog, "MAX_SIDE_PX", 32)
+    d = ExportDialog(model)
+    assert d.resolution.text().startswith("64 × 64 → 32 × 32") and not d.full_res.isHidden()
+    assert d.options().max_side == 32
+    d.full_res.setChecked(True)
+    assert d.resolution.text() == "64 × 64" and d.options().max_side is None
+
+    # several FOVs per well: a FOV matrix, same indices in every well
+    root = generate_experiment(tmp_path / "multi", wells=["A1", "B2"], fovs_per_well=3, nt=1,
+                               recording_frames=2, recording_planes=1,
+                               zstack_channels=[("DAPI", "#4a9eff")], zstack_nz=1)
+    d = ExportDialog(ExperimentModel(root, default_context()))
+    assert d.fovs is not None and d.fovs.selected() == ["0", "1", "2"]
+    d.fovs.clearSelection()
+    d.fovs.item(0, 1).setSelected(True)
+    d.out_dir.setText(str(out))
+    assert d.options().fovs == {1}
+    d.start()
+    _wait(d, qapp)
+    assert sorted(p.name for p in out.iterdir()) == ["A1_fov1.mp4", "B2_fov1.mp4"]
+
+
+def test_fov_viewer_exposes_current_clims(qapp, model):
+    from record_zstack_viewer.ui.fov_viewer import FovViewer
+    viewer = FovViewer()
+    assert viewer.current_clims() is None
+    datasets = model.open_fov("A1", 0)
+    viewer.set_datasets(datasets, "recording")
+    lo, hi = viewer.current_clims()
+    assert 0 <= lo < hi <= 65535
+    viewer.set_datasets(datasets, "zstack")
+    assert viewer.current_clims() is None                          # only recordings export
 
 
 def test_dialog_reports_a_planning_error_and_recovers(qapp, model, out, monkeypatch):

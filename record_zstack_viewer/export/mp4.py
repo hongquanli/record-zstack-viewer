@@ -72,8 +72,9 @@ def video_name(well: str, fov: int, acq_t: int, z: int, n_t: int, n_z: int,
 
 
 def plan(model: ExperimentModel, out_dir: Path, wells: list[str] | None = None,
-         overwrite: bool = False) -> list[ExportJob]:
-    """Every recording store of `wells` (default: all) as an `ExportJob`.
+         fovs: set[int] | None = None, overwrite: bool = False) -> list[ExportJob]:
+    """Every recording store of `wells` (default: all) as an `ExportJob`; `fovs`
+    (default: all) restricts the FOV indices within each well.
 
     A store whose mp4 is already on disk and newer than the store is left out
     unless `overwrite`. A store still being written (not complete while the run
@@ -84,7 +85,7 @@ def plan(model: ExperimentModel, out_dir: Path, wells: list[str] | None = None,
     jobs: list[ExportJob] = []
     for well in wells if wells is not None else model.wells():
         for node in model.fovs(well):
-            if not node.has_recording:
+            if not node.has_recording or (fovs is not None and node.fov not in fovs):
                 continue
             source = model.open_fov(well, node.fov).recording
             n_t, _frames, n_z = source.shape[:3]
@@ -130,30 +131,42 @@ def _to_uint8(plane: np.ndarray, lo: float, hi: float) -> np.ndarray:
     return np.clip(scaled, 0.0, 255.0).astype(np.uint8)
 
 
-def _ffmpeg_command(width: int, height: int, fps: float, out: Path) -> list[str]:
+def output_size(width: int, height: int, max_side: int | None = MAX_SIDE_PX) -> tuple[int, int]:
+    """The encoded frame size: even sides, downscaled to fit `max_side` (None: never)."""
+    width -= width % 2  # yuv420p needs even sides
+    height -= height % 2
+    if max_side and max(width, height) > max_side:
+        scale = max_side / max(width, height)
+        width, height = round(width * scale) // 2 * 2, round(height * scale) // 2 * 2
+    return width, height
+
+
+def _ffmpeg_command(width: int, height: int, fps: float, out: Path,
+                    max_side: int | None = MAX_SIDE_PX) -> list[str]:
     cmd = [imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error",
            "-f", "rawvideo", "-pix_fmt", "gray", "-s", f"{width}x{height}",
            "-r", f"{fps:.3f}", "-i", "-", "-an"]
-    if max(width, height) > MAX_SIDE_PX:
-        # keep aspect; -2 lets ffmpeg pick the other side, rounded to even
-        cmd += ["-vf", f"scale={MAX_SIDE_PX}:-2" if width >= height else f"scale=-2:{MAX_SIDE_PX}"]
+    out_w, out_h = output_size(width, height, max_side)
+    if (out_w, out_h) != (width, height):
+        cmd += ["-vf", f"scale={out_w}:{out_h}"]
     cmd += ["-c:v", "libx264", "-preset", "medium", "-crf", str(CRF),
             "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-f", "mp4", str(out)]
     return cmd
 
 
 def export_job(model: ExperimentModel, job: ExportJob, *, fps: float | None = None,
-               clims: tuple[float, float] | None = None,
+               clims: tuple[float, float] | None = None, max_side: int | None = MAX_SIDE_PX,
                on_progress: Callable[[int, int], None] | None = None,
                cancelled: Callable[[], bool] | None = None) -> ExportResult:
     """Encode one store to `job.out`. Atomic: a `.tmp` file is renamed on success
     and removed on any failure, cancel or interrupt.
 
-    `fps` defaults to real time (`default_fps`); `clims` to `auto_clims`. A frame
-    slot that was never written (all fill value) repeats the previous frame
-    rather than flashing black; the count is reported as `held` (a never-written
-    slot before the first real frame stays black). `cancelled()` is checked
-    before every frame: a cancelled job is discarded, `error == CANCELLED`.
+    `fps` defaults to real time (`default_fps`); `clims` to `auto_clims`;
+    `max_side` caps the frame size (None keeps full resolution). A frame slot
+    that was never written (all fill value) repeats the previous frame rather
+    than flashing black; the count is reported as `held` (a never-written slot
+    before the first real frame stays black). `cancelled()` is checked before
+    every frame: a cancelled job is discarded, `error == CANCELLED`.
     """
     result = ExportResult(job)
     source = model.open_fov(job.well, job.fov).recording
@@ -173,7 +186,7 @@ def export_job(model: ExperimentModel, job: ExportJob, *, fps: float | None = No
     try:
         fps = fps or default_fps(source)
         lo, hi = clims or auto_clims(source, job.acq_t, job.z, n_frames)
-        proc = subprocess.Popen(_ffmpeg_command(width, height, fps, tmp),
+        proc = subprocess.Popen(_ffmpeg_command(width, height, fps, tmp, max_side),
                                 stdin=subprocess.PIPE, stderr=subprocess.PIPE)
         for f in range(n_frames):
             if cancelled is not None and cancelled():
