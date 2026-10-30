@@ -31,13 +31,14 @@ class ExportJob:
 
 
 def plan(model: ExperimentModel, out_dir: Path, wells: list[str] | None = None,
-         overwrite: bool = False) -> list[ExportJob]:
+         overwrite: bool = False, skipped: list[Path] | None = None) -> list[ExportJob]:
     """Every recording store of `wells` (default: all) as an `ExportJob`.
 
-    An mp4 already on disk and newer than its store is left out (`overwrite`
-    re-plans it; it only ever replaces mp4 files, the zarr is read-only). A
-    store still being written (not complete while the run has no `.done`
-    marker yet) is left out; a later run picks it up.
+    An mp4 already on disk and newer than its store is left out and, when a
+    `skipped` list is given, appended to it so the caller can say so
+    (`overwrite` re-plans it; it only ever replaces mp4 files, the zarr is
+    read-only). A store still being written (not complete while the run has no
+    `.done` marker yet) is left out; a later run picks it up.
     """
     out_dir = Path(out_dir)
     run_finished = (Path(model.root) / ".done").exists()
@@ -56,6 +57,8 @@ def plan(model: ExperimentModel, out_dir: Path, wells: list[str] | None = None,
                         continue
                     out = out_dir / video_name(well, node.fov, acq_t, z, n_t, n_z, not complete)
                     if not overwrite and _up_to_date(out, store):
+                        if skipped is not None:
+                            skipped.append(out)
                         continue
                     jobs.append(ExportJob(well, node.fov, acq_t, z, store, out))
     return jobs

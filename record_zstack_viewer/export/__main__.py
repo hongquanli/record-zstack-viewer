@@ -34,9 +34,12 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = args.out.expanduser() if args.out is not None else default_out_dir(root)
 
     model = ExperimentModel(root, default_context())
-    jobs = plan(model, out_dir, wells=args.well)
+    skipped: list[Path] = []
+    jobs = plan(model, out_dir, wells=args.well, skipped=skipped)
+    for path in skipped:
+        print(f"{path.name}: already exists, skipped (delete it to redo)")
     if not jobs:
-        print("nothing to export (all mp4s up to date)")
+        print("nothing to export")
         return 0
     failures = 0
     for result in export_all(jobs, fps=args.fps):

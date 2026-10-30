@@ -201,7 +201,8 @@ def test_cli_exports_all_then_reports_nothing_to_do(single_plane, out, capsys):
     assert cli_main([str(single_plane), "--out", str(out)]) == 0
     assert sorted(p.name for p in out.iterdir()) == ["A1_fov0.mp4", "B2_fov0.mp4"]
     assert cli_main([str(single_plane), "--out", str(out)]) == 0
-    assert "nothing to export" in capsys.readouterr().out
+    text = capsys.readouterr().out
+    assert "A1_fov0.mp4: already exists, skipped" in text and "nothing to export" in text
 
 
 def test_cli_returns_1_when_a_file_fails(single_plane, out, monkeypatch, capsys):
@@ -273,9 +274,10 @@ def test_dialog_exports_current_well_in_worker(qapp, model, out):
     assert dialog.status.text().startswith("Done: 1 file")
     assert dialog.start_button.isEnabled() and not dialog.cancel_button.isEnabled()
 
-    dialog.start()                                     # second run: nothing left to do
+    dialog.start()                                     # second run: nothing left to do, and it says so
     _wait(dialog, qapp)
     assert dialog.log.toPlainText().count("frames") == 1
+    assert "B2_fov0.mp4: already exists, skipped" in dialog.log.toPlainText()
     assert dialog.status.text().startswith("Done: 0 file")
 
 
