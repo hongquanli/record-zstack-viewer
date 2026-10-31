@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from qtpy.QtCore import Qt, QThread, Signal  # type: ignore[attr-defined]
-from qtpy.QtGui import QColor
+from qtpy.QtGui import QColor, QPalette
 from qtpy.QtWidgets import (QAbstractItemView, QDialog, QDoubleSpinBox,
                             QFileDialog, QFormLayout, QHBoxLayout, QLabel,
                             QLineEdit, QPlainTextEdit, QProgressBar, QPushButton,
@@ -124,6 +124,13 @@ class WellSelector(QTableWidget):
         self.setVerticalHeaderLabels([_row_label(r) for r in range(rows)] + (["other"] if other else []))
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setSelectionBehavior(QAbstractItemView.SelectItems)
+        # Keep selected wells blue when focus is elsewhere (the All button, the
+        # fps box): Qt otherwise paints them in the inactive highlight, near
+        # white on Windows.
+        pal = self.palette()
+        for role in (QPalette.Highlight, QPalette.HighlightedText):
+            pal.setColor(QPalette.Inactive, role, pal.color(QPalette.Active, role))
+        self.setPalette(pal)
         self.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -163,6 +170,7 @@ class ExportDialog(QDialog):
         self.wells = WellSelector(wells, model.plate_format(),
                                   {current_well} if current_well in wells else set(wells), self)
         all_btn = QPushButton("All", self)
+        all_btn.setFocusPolicy(Qt.NoFocus)  # focus stays on the matrix
         all_btn.clicked.connect(self.wells.selectAll)
         wells_row = QHBoxLayout()
         wells_row.addWidget(all_btn)

@@ -259,6 +259,22 @@ def test_well_selector_is_a_plate_matrix(qapp, model):
     assert [b.text() for b in dialog.findChildren(QPushButton)] == ["All", "Browse…", "Export", "Cancel", "Close"]
 
 
+def test_selection_stays_blue_when_matrix_loses_focus(qapp, model):
+    """Regression (Windows): clicking All moved focus to the button and Qt drew
+    the selection in the inactive highlight, near white. The button must not
+    take focus, and the matrix paints inactive selection like active."""
+    from qtpy.QtGui import QPalette
+    from qtpy.QtWidgets import QPushButton
+    from record_zstack_viewer.ui.export_dialog import ExportDialog
+
+    dialog = ExportDialog(model)
+    all_btn = next(b for b in dialog.findChildren(QPushButton) if b.text() == "All")
+    assert all_btn.focusPolicy() == Qt.NoFocus
+    pal = dialog.wells.palette()
+    for role in (QPalette.Highlight, QPalette.HighlightedText):
+        assert pal.color(QPalette.Inactive, role) == pal.color(QPalette.Active, role)
+
+
 def test_dialog_exports_current_well_in_worker(qapp, model, out):
     from record_zstack_viewer.ui.export_dialog import ExportDialog
 
