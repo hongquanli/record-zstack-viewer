@@ -41,7 +41,8 @@ displayed well is pre-selected), one file per recording store (`A1_fov_0.mp4`, m
 with `_z{j}` for plane stores and `_t{t}` after the well for time-lapse runs). Output defaults
 to `~/Downloads/mp4-<experiment>/`, never inside the data folder. The videos are
 a copy of the screen: the contrast limits and colour of the displayed recording
-apply to every file in the export (the dialog shows them). Playback is
+apply to every file in the export (the dialog shows them). A recording keeps the
+limits you set when you switch wells, so set them once and export. Playback is
 real time as recorded unless you set an fps. An mp4 already there is rewritten
 (the zarr is only ever read).
 Encoding runs in the background; live following keeps working.
