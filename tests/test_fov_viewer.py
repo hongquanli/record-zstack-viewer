@@ -256,6 +256,25 @@ def test_current_lut_is_what_the_recording_is_painted_with(qapp, ds):
     assert v.current_lut() == (None, None)                      # only recordings are exported
 
 
+def test_recording_contrast_is_kept_across_fov_switches(qapp, tiny_experiment, ds):
+    """Set the limits once, look at any well: a recording keeps the contrast
+    limits and colormap the user set when the displayed FOV changes (and when
+    coming back from a z-stack). Only the first recording shown auto-contrasts;
+    `auto_contrast()` still recomputes on demand."""
+    from ndv.models import ClimsManual
+    other = open_fov(tiny_experiment, "B2", 0, default_context())
+    v = FovViewer()
+    v.set_datasets(ds, "recording")
+    v.ndv_viewer.display_model.default_lut.clims = ClimsManual(min=10, max=20)   # the user drags
+    v.set_datasets(other, "recording")                                            # clicks another well
+    assert v.current_lut() == ((10.0, 20.0), "#FFFFFF")
+    v.set_datasets(other, "zstack")                                               # looks at the z-stack
+    v.set_datasets(ds, "recording")                                               # and comes back
+    assert v.current_lut() == ((10.0, 20.0), "#FFFFFF")
+    v.auto_contrast()                                                             # explicit reset only
+    assert v.current_lut()[0] != (10.0, 20.0)
+
+
 def test_viewer_recording_grayscale_auto_contrast(qapp, ds):
     v = FovViewer()
     v.set_datasets(ds, "recording")

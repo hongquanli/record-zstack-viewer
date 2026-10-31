@@ -253,6 +253,7 @@ class FovViewer(QWidget):
         self._viewer: ArrayViewer | None = None
         self._source: FovSource | None = None
         self._mode: str | None = None
+        self._recording_lut: LUTModel | None = None  # the LUT the last recording was shown with
 
     @property
     def mode(self) -> str | None:
@@ -292,6 +293,7 @@ class FovViewer(QWidget):
             raise ValueError(f"mode must be one of {_MODES}, got {mode!r}")
         wrapper = FovSourceDataWrapper(source)
         model = _display_model_for(source, mode)
+        self._carry_recording_lut(model, mode)
         if (self._viewer is not None and self._source is not None
                 and tuple(source.dims) == tuple(self._source.dims)):
             try:
@@ -306,6 +308,19 @@ class FovViewer(QWidget):
         else:
             self._rebuild(wrapper, model)
         self._source, self._mode = source, mode
+
+    def _carry_recording_lut(self, model: ArrayDisplayModel, mode: str) -> None:
+        """Recordings keep the contrast limits and colormap across FOV switches:
+        the user sets them once and every well, and the mp4 export, uses them.
+        Only the first recording shown auto-contrasts (`auto_contrast()` resets
+        on demand). The LUT is remembered when leaving recording mode, so a
+        detour through a z-stack does not lose it."""
+        if self._viewer is not None and self._mode == "recording":
+            self._recording_lut = self._viewer.display_model.default_lut
+        kept = self._recording_lut
+        if mode == "recording" and kept is not None and isinstance(kept.clims, ClimsManual):
+            model.default_lut.clims = ClimsManual(min=kept.clims.min, max=kept.clims.max)
+            model.default_lut.cmap = kept.cmap
 
     def _rebuild(self, wrapper: FovSourceDataWrapper, model: ArrayDisplayModel) -> None:
         """Clean fallback: a fresh ArrayViewer via its public constructor."""
