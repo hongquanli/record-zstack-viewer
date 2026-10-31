@@ -33,6 +33,51 @@ The path is the experiment root (the directory holding `recording/` and/or
 `zarr/`). Each window follows a growing acquisition automatically (a ~1 s
 UI-thread poll/tick).
 
+## Export recordings to mp4
+
+**Export mp4…** (top bar) converts recordings to H.264 mp4 files that play
+anywhere. Pick wells on the plate matrix (click, shift-click a range, drag; the
+displayed well is pre-selected), one file per recording store (`A1_fov_0.mp4`, mirroring `fov_0.ome.zarr`,
+with `_z{j}` for plane stores and `_t{t}` after the well for time-lapse runs). Output defaults
+to `~/Downloads/mp4-<experiment>/`, never inside the data folder. Playback is
+real time as recorded unless you set an fps. Files that are already up to date
+are skipped (delete an mp4 to regenerate it; the zarr is only ever read).
+Encoding runs in the background; live following keeps working.
+
+The same thing from a shell, no Qt needed:
+
+```bash
+python -m record_zstack_viewer.export /path/to/experiment                 # all wells
+python -m record_zstack_viewer.export /path/to/experiment --well A1 --out ~/videos
+```
+
+**Same converter inside Squid.** `record_zstack_viewer/export/convert.py` is
+self-contained (numpy, tensorstore, imageio-ffmpeg only). Squid can import it,
+or copy that one file, and call it when a recording store finalizes, so a
+"save mp4s" toggle at acquisition time produces exactly the files the viewer
+would, in the same `~/Downloads/mp4-<experiment>/` folder:
+
+```python
+from record_zstack_viewer.export.convert import convert_store, default_out_dir, video_name
+
+out = default_out_dir(experiment_dir) / video_name(well, fov, t, z, n_t, n_z, partial=False)
+result = convert_store(store_dir, out)       # result.ok, result.frames, result.window, result.summary()
+```
+
+What the conversion does, and does not, change: full pixel resolution, every
+captured frame, real-time rate. An mp4 cannot hold 16-bit data, so each video
+goes through one linear 16-to-8 window, the video's own min and max, which
+clips nothing; the window is printed per file and stored in the mp4's
+`comment` metadata so the mapping can be read back from the file. H.264 at
+CRF 12 is near-lossless, not bit-exact; the zarr stays the ground truth.
+Odd sides are cropped by one pixel (yuv420p needs even sides). Frames wider
+than 4096 px (1x1 binning on large sensors) exceed what some players decode;
+VLC handles them. A store that never completed exports its captured frames as
+`…_partial.mp4`; a frame slot the camera never delivered repeats the previous
+frame instead of flashing black (reported as "held"). Frames stream one at a
+time through ffmpeg (from the `imageio-ffmpeg` wheel), so memory does not grow
+with video length.
+
 ## Launcher & desktop shortcut
 
 Launched with **no path**, the app opens a small **launcher**: drop a Squid

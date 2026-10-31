@@ -5,7 +5,7 @@ requires-python = ">=3.11"
 dependencies = [
   "tensorstore>=0.1.60", "numpy>=1.26", "ndv>=0.3", "vispy>=0.14", "cmap>=0.3",
   "qtpy>=2.4", "PyQt5>=5.15", "pyqtgraph>=0.13", "PyYAML>=6", "platformdirs>=3.10",
-  "imageio>=2.31",
+  "imageio>=2.31", "imageio-ffmpeg>=0.5",
 ]
 [project.optional-dependencies]
 test = ["pytest>=8"]

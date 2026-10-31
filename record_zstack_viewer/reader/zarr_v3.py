@@ -283,6 +283,25 @@ class RecordingFovSource:
         unreadable, so the declared extent is returned as a whole-store 'acquiring')."""
         return not self._sharded
 
+    # --- per-store facts (one `(acq_t, z)` = one store on disk), for export -----
+
+    def store_path(self, acq_t: int, z: int) -> Path:
+        """The store directory holding the frames of `(acq_t, z)`."""
+        return self._store[(int(acq_t), int(z))]
+
+    def frames_written(self, acq_t: int, z: int) -> int:
+        """Frames present in the `(acq_t, z)` store: `_squid.captured_frames`, else
+        the `c/` chunk-dir count; the declared size when sharded."""
+        store = self.store_path(acq_t, z)
+        if self._sharded:
+            return self.shape[1]
+        cf = _squid_of(store).get("captured_frames")
+        return int(cf) if cf is not None else _count_dim0_chunks(store)
+
+    def is_complete(self, acq_t: int, z: int) -> bool:
+        """`_squid.acquisition_complete` of the `(acq_t, z)` store."""
+        return bool(_squid_of(self.store_path(acq_t, z)).get("acquisition_complete", False))
+
 
 def build_recording_source(root: str | Path, well: str, fov: int,
                            context: ts.Context,
