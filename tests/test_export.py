@@ -1,4 +1,4 @@
-"""zarr -> mp4 export: planning, encoding, fidelity, partial stores, holes, failures,
+"""zarr -> mp4 export: planning, encoding, fidelity, incomplete stores, failures,
 cancel, CLI, dialog (plate matrix, worker lifecycle)."""
 import os
 
@@ -62,10 +62,10 @@ def out(tmp_path):
 # ------------------------------------------------------------------ planning
 
 def test_video_name_adds_axes_only_when_needed():
-    assert mp4.video_name("A1", 0, 0, 0, 1, 1, False) == "A1_fov_0.mp4"          # mirrors fov_0.ome.zarr
-    assert mp4.video_name("A1", 2, 1, 0, 3, 1, False) == "A1_t1_fov_2.mp4"
-    assert mp4.video_name("A1", 0, 0, 2, 1, 3, False) == "A1_fov_0_z2.mp4"       # mirrors fov_0_z2.ome.zarr
-    assert mp4.video_name("A1", 0, 1, 2, 2, 3, True) == "A1_t1_fov_0_z2_partial.mp4"
+    assert mp4.video_name("A1", 0, 0, 0, 1, 1) == "A1_fov_0.mp4"          # mirrors fov_0.ome.zarr
+    assert mp4.video_name("A1", 2, 1, 0, 3, 1) == "A1_t1_fov_2.mp4"
+    assert mp4.video_name("A1", 0, 0, 2, 1, 3) == "A1_fov_0_z2.mp4"       # mirrors fov_0_z2.ome.zarr
+    assert mp4.video_name("A1", 0, 1, 2, 2, 3) == "A1_t1_fov_0_z2.mp4"
 
 
 def test_plan_one_job_per_store_and_skips_up_to_date(model, out):
@@ -94,7 +94,7 @@ def test_default_out_dir_is_downloads_per_experiment(tmp_path):
 def test_export_writes_every_frame_at_full_size(model, out):
     job = mp4.plan(model, out)[0]
     result = mp4.export_job(job)
-    assert result.ok and result.frames == 6 and result.missing == 0
+    assert result.ok and result.frames == 6
     assert job.out.exists() and _tmp_files(out) == []
     assert _decode(job.out, 64, 64).shape == (6, 64, 64)
 
@@ -134,7 +134,7 @@ def test_default_fps_prefers_effective_fps(single_plane):
     assert source.metadata.effective_fps == 9.5 and convert.default_fps(store) == 9.5
 
 
-def test_partial_store_exports_captured_frames(tmp_path, out):
+def test_incomplete_store_exports_its_captured_frames_once_the_run_is_done(tmp_path, out):
     root = generate_experiment(tmp_path / "exp", wells=["A1"], fovs_per_well=1, nt=1,
                                recording_frames=6, recording_planes=1,
                                zstack_channels=[("DAPI", "#4a9eff")], zstack_nz=2, complete=False)
@@ -142,23 +142,24 @@ def test_partial_store_exports_captured_frames(tmp_path, out):
     assert mp4.plan(model, out) == []                  # run still going: left alone
     (root / ".done").write_text("")                    # aborted run: .done without completion
     (job,) = mp4.plan(model, out)
-    assert job.out.name == "A1_fov_0_partial.mp4"
+    assert job.out.name == "A1_fov_0.mp4"             # the name mirrors the store, complete or not
     result = mp4.export_job(job)
     assert result.ok and result.frames == 3
 
 
-def test_unwritten_slot_repeats_previous_frame(model, out):
+def test_unwritten_slot_is_a_black_frame(model, out):
+    """A translation, not a repair: a slot the recorder never wrote reads as the
+    fill value and is written as it reads, a black frame."""
     source = model.open_fov("A1", 0).recording
     written = np.stack([source.read_plane({"acq_t": 0, "frame": f, "z": 0}) for f in (0, 1, 2, 4, 5)])
     shutil.rmtree(source.store_path(0, 0) / "c" / "3")  # frame 3 was never written
     job = mp4.plan(model, out)[0]
     result = mp4.export_job(job)
-    assert result.ok and result.missing == 1 and result.frames == 6
-    assert result.window == (float(written.min()), float(written.max()))  # empty slot ignored
-    assert result.summary() == (f"A1_fov_0.mp4: 6 frames (1 missing, previous frame repeated), "
-                                f"window {written.min()}–{written.max()}")
+    assert result.ok and result.frames == 6
+    assert result.window == (0.0, float(written.max()))              # the black frame is data too
+    assert result.summary() == f"A1_fov_0.mp4: 6 frames, window 0–{written.max()}"
     frames = _decode(job.out, 64, 64)
-    assert np.abs(frames[3].astype(int) - frames[2].astype(int)).mean() < 1.0
+    assert frames[3].max() <= 1 and frames[2].mean() > 1
 
 
 def test_odd_frame_size_is_cropped_even(tmp_path, out):
