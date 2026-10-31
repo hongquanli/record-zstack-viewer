@@ -1,8 +1,8 @@
 """CLI: ``python -m record_zstack_viewer.export EXPERIMENT [--well A1] [--out DIR]``.
 
 Converts every recording store of an experiment (or of the given wells) to
-mp4, one file per store, skipping files that are already up to date (delete an
-mp4 to regenerate it). Qt-free, so it runs on a headless box.
+mp4, one file per store, rewriting any mp4 already there. Qt-free, so it runs
+on a headless box.
 """
 from __future__ import annotations
 
@@ -34,10 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = args.out.expanduser() if args.out is not None else default_out_dir(root)
 
     model = ExperimentModel(root, default_context())
-    skipped: list[Path] = []
-    jobs = plan(model, out_dir, wells=args.well, skipped=skipped)
-    for path in skipped:
-        print(f"{path.name}: already exists, skipped (delete it to redo)")
+    jobs = plan(model, out_dir, wells=args.well)
     if not jobs:
         print("nothing to export")
         return 0

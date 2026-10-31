@@ -42,8 +42,8 @@ with `_z{j}` for plane stores and `_t{t}` after the well for time-lapse runs). O
 to `~/Downloads/mp4-<experiment>/`, never inside the data folder. The videos are
 a copy of the screen: the contrast limits and colour of the displayed recording
 apply to every file in the export (the dialog shows them). Playback is
-real time as recorded unless you set an fps. Files that are already up to date
-are skipped (delete an mp4 to regenerate it; the zarr is only ever read).
+real time as recorded unless you set an fps. An mp4 already there is rewritten
+(the zarr is only ever read).
 Encoding runs in the background; live following keeps working.
 
 The same thing from a shell, no Qt needed:
@@ -75,7 +75,7 @@ viewer's black-to-channel-colour ramp: the displayed colour from the viewer,
 the store's own `omero` channel colour otherwise (white stays gray). Window and
 colour are printed per file and stored in the mp4's `comment` metadata, so any
 file states how it was made and can be regenerated from the zarr. H.264 at
-CRF 12 (preset veryfast) is near-lossless, not bit-exact: about one gray level
+CRF 12 (preset ultrafast, speed over file size) is near-lossless, not bit-exact: about one gray level
 of error for gray video, about three for coloured video, because players need
 colour stored at half resolution (yuv420p). The zarr stays the ground truth.
 Odd sides are cropped by one pixel (yuv420p needs even sides). Frames wider
