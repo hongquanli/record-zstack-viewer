@@ -8,6 +8,7 @@ the next frame and discards the file in progress. Output defaults to
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
 from qtpy.QtCore import Qt, QThread, Signal  # type: ignore[attr-defined]
 from qtpy.QtGui import QColor, QPalette
@@ -166,16 +167,19 @@ class ExportDialog(QDialog):
     `.start_button`, `.cancel_button`, `.log`, `.status`, `.start()`, `.worker`,
     `.output_path()`.
 
-    `window` and `color` are what the viewer is painting the displayed recording
-    with (`FovViewer.current_lut()`); every file of the export is a copy of that.
-    Without them each video uses its own min/max and the recorded channel colour."""
+    `lut` returns what the viewer is painting the displayed recording with right
+    now (`FovViewer.current_lut`: `((lo, hi), "#RRGGBB")`). It is called when
+    Export is pressed, not when the dialog opens, since the dialog is non-modal
+    and the user may drag the limits in between; every file of the export is a
+    copy of that. Without it each video uses its own min/max and the recorded
+    channel colour."""
 
     def __init__(self, model: ExperimentModel, current_well: str | None = None,
-                 parent: QWidget | None = None, *, window: tuple[float, float] | None = None,
-                 color: str | None = None) -> None:
+                 parent: QWidget | None = None, *,
+                 lut: Callable[[], tuple[tuple[float, float] | None, str | None]] | None = None) -> None:
         super().__init__(parent)
         self._model = model
-        self._window, self._color = window, color
+        self._lut = lut or (lambda: (None, None))
         self.worker: ExportWorker | None = None
         self.setWindowTitle("Export recordings to mp4")
         self.setMinimumWidth(600)
@@ -206,7 +210,7 @@ class ExportDialog(QDialog):
         self.fps.setDecimals(2)
         self.fps.setSpecialValueText("real time (as recorded)")
         self.fps.setValue(0.0)
-        self.contrast = QLabel(_contrast_text(window, color), self)
+        self.contrast = QLabel(_contrast_text(*self._lut()), self)
 
         self.progress = QProgressBar(self)
         self.progress.setFormat("%v / %m files")
@@ -260,12 +264,14 @@ class ExportDialog(QDialog):
             self.status.setText("Select at least one well.")
             return
         out_dir = self.output_path()
+        window, color = self._lut()  # what is on screen at this moment
+        self.contrast.setText(_contrast_text(window, color))
         self.progress.setRange(0, 0)  # busy until planned
         self.status.setText(f"Planning export to {_short(out_dir)}…")
         self.start_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
         self.worker = ExportWorker(self._model, out_dir, wells, self.fps.value() or None,
-                                   self._window, self._color)
+                                   window, color)
         self.worker.planned.connect(self._on_planned)
         self.worker.file_progress.connect(self._on_file_progress)
         self.worker.file_done.connect(self._on_file_done)

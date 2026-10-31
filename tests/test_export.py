@@ -358,17 +358,24 @@ def test_dialog_exports_current_well_in_worker(qapp, model, out):
     assert dialog.status.text().startswith("Done: 1 file")
 
 
-def test_dialog_passes_the_displayed_lut_to_every_file(qapp, model, out):
+def test_dialog_reads_the_displayed_lut_when_export_is_pressed(qapp, model, out):
+    """Regression: the dialog used to read the viewer's LUT once, when it opened.
+    It is non-modal, so limits dragged after opening it (or reset by looking at
+    another well) were not what went out. The LUT is read on Export, for every
+    file, and the Contrast row shows what was used."""
     from record_zstack_viewer.ui.export_dialog import ExportDialog
 
-    dialog = ExportDialog(model, window=(100.0, 200.0), color="#00FF00")
+    screen = {"lut": ((100.0, 200.0), "#00FF00")}
+    dialog = ExportDialog(model, lut=lambda: screen["lut"])
     assert dialog.contrast.text() == "100 to 200 as displayed, colour #00FF00"
+    screen["lut"] = ((300.0, 400.0), "#FF0000")          # the user drags the slider, dialog still open
     dialog.out_dir.setText(str(out))
     dialog.start()
     _wait(dialog, qapp)
+    assert dialog.contrast.text() == "300 to 400 as displayed, colour #FF0000"
     log = dialog.log.toPlainText()
-    assert "A1_fov_0.mp4: 6 frames, window 100–200, color #00FF00" in log
-    assert "B2_fov_0.mp4: 6 frames, window 100–200, color #00FF00" in log
+    assert "A1_fov_0.mp4: 6 frames, window 300–400, color #FF0000" in log
+    assert "B2_fov_0.mp4: 6 frames, window 300–400, color #FF0000" in log
     assert ExportDialog(model).contrast.text() == "each video's own min and max, channel colour as recorded"
 
 
