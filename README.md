@@ -39,7 +39,9 @@ UI-thread poll/tick).
 anywhere. Pick wells on the plate matrix (click, shift-click a range, drag; the
 displayed well is pre-selected), one file per recording store (`A1_fov_0.mp4`, mirroring `fov_0.ome.zarr`,
 with `_z{j}` for plane stores and `_t{t}` after the well for time-lapse runs). Output defaults
-to `~/Downloads/mp4-<experiment>/`, never inside the data folder. Playback is
+to `~/Downloads/mp4-<experiment>/`, never inside the data folder. The videos are
+a copy of the screen: the contrast limits and colour of the displayed recording
+apply to every file in the export (the dialog shows them). Playback is
 real time as recorded unless you set an fps. Files that are already up to date
 are skipped (delete an mp4 to regenerate it; the zarr is only ever read).
 Encoding runs in the background; live following keeps working.
@@ -61,15 +63,21 @@ would, in the same `~/Downloads/mp4-<experiment>/` folder:
 from record_zstack_viewer.export.convert import convert_store, default_out_dir, video_name
 
 out = default_out_dir(experiment_dir) / video_name(well, fov, t, z, n_t, n_z)
-result = convert_store(store_dir, out)       # result.ok, result.frames, result.window, result.summary()
+result = convert_store(store_dir, out)       # window/colour from the store; result.ok, .frames, .window, .color, .summary()
 ```
 
 What the conversion does, and does not, change: full pixel resolution, every
 captured frame, real-time rate. An mp4 cannot hold 16-bit data, so each video
-goes through one linear 16-to-8 window, the video's own min and max, which
-clips nothing; the window is printed per file and stored in the mp4's
-`comment` metadata so the mapping can be read back from the file. H.264 at
-CRF 12 is near-lossless, not bit-exact; the zarr stays the ground truth.
+goes through one linear 16-to-8 window. From the viewer that window is the
+displayed contrast limits; from the CLI, and in Squid, it is the video's own
+min and max, which clips nothing. The 8-bit value is then painted on the
+viewer's black-to-channel-colour ramp: the displayed colour from the viewer,
+the store's own `omero` channel colour otherwise (white stays gray). Window and
+colour are printed per file and stored in the mp4's `comment` metadata, so any
+file states how it was made and can be regenerated from the zarr. H.264 at
+CRF 12 (preset veryfast) is near-lossless, not bit-exact: about one gray level
+of error for gray video, about three for coloured video, because players need
+colour stored at half resolution (yuv420p). The zarr stays the ground truth.
 Odd sides are cropped by one pixel (yuv420p needs even sides). Frames wider
 than 4096 px (1x1 binning on large sensors) exceed what some players decode;
 VLC handles them. A store that never completed exports the frames it captured,

@@ -239,6 +239,23 @@ def test_viewer_zstack_composite_auto_contrast(qapp, ds):
         assert lut.clim_bounds == FULL_UINT16   # window used only as clamp bounds
 
 
+def test_current_lut_is_what_the_recording_is_painted_with(qapp, ds):
+    """The export copies the screen: `current_lut()` is the manual contrast
+    limits and the top colour of the channel ramp, for the displayed recording."""
+    from ndv.models import ClimsManual
+    v = FovViewer()
+    assert v.current_lut() == (None, None)                      # nothing shown yet
+    v.set_datasets(ds, "recording")
+    dm = v.ndv_viewer.display_model
+    window, color = v.current_lut()
+    assert window == (float(dm.default_lut.clims.min), float(dm.default_lut.clims.max))
+    assert color == "#FFFFFF"                                   # fixture channel is white
+    dm.default_lut.clims = ClimsManual(min=10, max=20)          # the user drags the limits
+    assert v.current_lut() == ((10.0, 20.0), "#FFFFFF")
+    v.set_datasets(ds, "zstack")
+    assert v.current_lut() == (None, None)                      # only recordings are exported
+
+
 def test_viewer_recording_grayscale_auto_contrast(qapp, ds):
     v = FovViewer()
     v.set_datasets(ds, "recording")

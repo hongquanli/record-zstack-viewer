@@ -34,22 +34,24 @@ class ExportWorker(QThread):
     finished_all = Signal(int, str)         # files written, error text ("" when none)
 
     def __init__(self, model: ExperimentModel, out_dir: Path, wells: list[str],
-                 fps: float | None) -> None:
+                 fps: float | None, window: tuple[float, float] | None = None,
+                 color: str | None = None) -> None:
         super().__init__()
-        self._args = (model, out_dir, wells, fps)
+        self._args = (model, out_dir, wells, fps, window, color)
         self._cancel = False
 
     def cancel(self) -> None:
         self._cancel = True
 
     def run(self) -> None:  # noqa: D401 (QThread entry point)
-        model, out_dir, wells, fps = self._args
+        model, out_dir, wells, fps, window, color = self._args
         written = 0
         try:
             skipped: list[Path] = []
             jobs = plan(model, out_dir, wells=wells, skipped=skipped)
             self.planned.emit(len(jobs), skipped)
-            for result in export_all(jobs, fps=fps, on_progress=self.file_progress.emit,
+            for result in export_all(jobs, fps=fps, window=window, color=color,
+                                     on_progress=self.file_progress.emit,
                                      cancelled=lambda: self._cancel):
                 written += int(result.ok)
                 self.file_done.emit(result)
@@ -154,14 +156,27 @@ class WellSelector(QTableWidget):
 
 # -------------------------------------------------------------------- dialog
 
+def _contrast_text(window: tuple[float, float] | None, color: str | None) -> str:
+    if window is None:
+        return "each video's own min and max, channel colour as recorded"
+    return f"{window[0]:g} to {window[1]:g} as displayed, colour {color or 'as recorded'}"
+
+
 class ExportDialog(QDialog):
-    """Public surface for tests: `.wells`, `.out_dir`, `.fps`, `.start_button`,
-    `.cancel_button`, `.log`, `.status`, `.start()`, `.worker`, `.output_path()`."""
+    """Public surface for tests: `.wells`, `.out_dir`, `.fps`, `.contrast`,
+    `.start_button`, `.cancel_button`, `.log`, `.status`, `.start()`, `.worker`,
+    `.output_path()`.
+
+    `window` and `color` are what the viewer is painting the displayed recording
+    with (`FovViewer.current_lut()`); every file of the export is a copy of that.
+    Without them each video uses its own min/max and the recorded channel colour."""
 
     def __init__(self, model: ExperimentModel, current_well: str | None = None,
-                 parent: QWidget | None = None) -> None:
+                 parent: QWidget | None = None, *, window: tuple[float, float] | None = None,
+                 color: str | None = None) -> None:
         super().__init__(parent)
         self._model = model
+        self._window, self._color = window, color
         self.worker: ExportWorker | None = None
         self.setWindowTitle("Export recordings to mp4")
         self.setMinimumWidth(600)
@@ -192,6 +207,7 @@ class ExportDialog(QDialog):
         self.fps.setDecimals(2)
         self.fps.setSpecialValueText("real time (as recorded)")
         self.fps.setValue(0.0)
+        self.contrast = QLabel(_contrast_text(window, color), self)
 
         self.progress = QProgressBar(self)
         self.progress.setFormat("%v / %m files")
@@ -216,6 +232,7 @@ class ExportDialog(QDialog):
         form.addRow("Wells", wells_box)
         form.addRow("Output folder", out_row)
         form.addRow("Playback fps", self.fps)
+        form.addRow("Contrast", self.contrast)
         form.addRow(self.progress)
         form.addRow(self.status)
         form.addRow(self.log)
@@ -248,7 +265,8 @@ class ExportDialog(QDialog):
         self.status.setText(f"Planning export to {_short(out_dir)}…")
         self.start_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
-        self.worker = ExportWorker(self._model, out_dir, wells, self.fps.value() or None)
+        self.worker = ExportWorker(self._model, out_dir, wells, self.fps.value() or None,
+                                   self._window, self._color)
         self.worker.planned.connect(self._on_planned)
         self.worker.file_progress.connect(self._on_file_progress)
         self.worker.file_done.connect(self._on_file_done)
