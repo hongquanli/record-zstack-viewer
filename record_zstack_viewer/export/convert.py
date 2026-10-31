@@ -38,7 +38,6 @@ class ConvertResult:
     store: Path
     out: Path
     frames: int = 0                            # frames written to the mp4
-    held: int = 0                              # never-written slots filled with the previous frame
     window: tuple[float, float] | None = None  # the 16-to-8 window used
     error: str | None = None                   # set when no file was written
 
@@ -47,14 +46,13 @@ class ConvertResult:
         return self.error is None
 
     def summary(self) -> str:
-        """One log line: `A1_fov0.mp4: 30 frames, window 4–65534`."""
+        """One log line: `A1_fov_0.mp4: 30 frames, window 4–65534`."""
         if self.error == CANCELLED:
             return f"{self.out.name}: cancelled"
         if self.error is not None:
             return f"{self.out.name}: FAILED: {self.error}"
-        held = f", {self.held} held frame(s)" if self.held else ""
         lo, hi = self.window
-        return f"{self.out.name}: {self.frames} frames{held}, window {lo:g}–{hi:g}"
+        return f"{self.out.name}: {self.frames} frames, window {lo:g}–{hi:g}"
 
 
 # ----------------------------------------------------------------- naming
@@ -65,18 +63,15 @@ def default_out_dir(experiment_dir: str | Path) -> Path:
     return Path.home() / "Downloads" / f"mp4-{Path(experiment_dir).name}"
 
 
-def video_name(well: str, fov: int, acq_t: int, z: int, n_t: int, n_z: int,
-               partial: bool) -> str:
+def video_name(well: str, fov: int, acq_t: int, z: int, n_t: int, n_z: int) -> str:
     """The store's own name, prefixed by its well: `recording/t0/A1/fov_0.ome.zarr`
     becomes `A1_fov_0.mp4`, a plane store `fov_0_z1.ome.zarr` becomes
     `A1_fov_0_z1.mp4`. `_t{t}` is inserted after the well only when the run has
-    several timepoints, `_partial` is appended when the store never completed."""
+    several timepoints."""
     name = f"{well}_t{acq_t}" if n_t > 1 else well
     name += f"_fov_{fov}"
     if n_z > 1:
         name += f"_z{z}"
-    if partial:
-        name += "_partial"
     return name + ".mp4"
 
 
@@ -86,10 +81,6 @@ def squid_attrs(store: Path) -> dict:
     """The `_squid` block of the store's `zarr.json` (empty when absent)."""
     meta = json.loads((Path(store) / "zarr.json").read_text())
     return (meta.get("attributes") or {}).get("_squid") or {}
-
-
-def is_complete(store: Path) -> bool:
-    return bool(squid_attrs(store).get("acquisition_complete", False))
 
 
 def frames_written(store: Path, declared: int) -> int:
@@ -161,14 +152,11 @@ def check_store(store: Path) -> dict:
 # -------------------------------------------------------------- conversion
 
 def data_window(arr: ts.TensorStore, n_frames: int) -> tuple[float, float]:
-    """The video's own `(min, max)` over every written frame, one read pass."""
+    """The video's own `(min, max)` over every frame, one read pass."""
     lo, hi = np.inf, -np.inf
     for f in range(n_frames):
         plane = arr[f, 0, 0].read().result()
-        if plane.any():  # a never-written slot is all fill value, not data
-            lo, hi = min(lo, float(plane.min())), max(hi, float(plane.max()))
-    if not np.isfinite(lo):
-        lo, hi = 0.0, 0.0
+        lo, hi = min(lo, float(plane.min())), max(hi, float(plane.max()))
     return (lo, hi) if hi > lo else (lo, lo + 1.0)
 
 
@@ -196,17 +184,15 @@ def convert_store(store: str | Path, out: str | Path, *, fps: float | None = Non
 
     Atomic: a `.tmp` file is renamed on success and removed on any failure,
     cancel or interrupt. `fps` defaults to real time. An odd side is cropped by
-    one pixel (yuv420p needs even sides); nothing else is resampled. A frame
-    slot that was never written (all fill value) repeats the previous frame
-    rather than flashing black; the count is reported as `held` (a never-written
-    slot before the first real frame stays black). `cancelled()` is checked
+    one pixel (yuv420p needs even sides); nothing else is resampled. Frames are
+    written exactly as the store reads them: a slot the recorder never wrote
+    reads as the fill value and becomes a black frame. `cancelled()` is checked
     before every frame: a cancelled job is discarded, `error == CANCELLED`.
     """
     store, out = Path(store), Path(out)
     result = ConvertResult(store, out)
     proc: subprocess.Popen | None = None
     tmp = out.with_name(out.name + ".tmp")
-    previous: np.ndarray | None = None
     result.error = "interrupted"  # cleared only when every frame went through
     try:
         check_store(store)
@@ -226,9 +212,6 @@ def convert_store(store: str | Path, out: str | Path, *, fps: float | None = Non
                 result.error = CANCELLED
                 break
             plane = arr[f, 0, 0, :height, :width].read().result()
-            if not plane.any() and previous is not None:
-                plane, result.held = previous, result.held + 1
-            previous = plane
             proc.stdin.write(_to_uint8(plane, lo, hi).tobytes())
             result.frames += 1
             if on_progress is not None:

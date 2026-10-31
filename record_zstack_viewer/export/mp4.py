@@ -52,10 +52,9 @@ def plan(model: ExperimentModel, out_dir: Path, wells: list[str] | None = None,
             for acq_t in range(n_t):
                 for z in range(n_z):
                     store = source.store_path(acq_t, z)
-                    complete = source.is_complete(acq_t, z)
-                    if not complete and not run_finished:
+                    if not source.is_complete(acq_t, z) and not run_finished:
                         continue
-                    out = out_dir / video_name(well, node.fov, acq_t, z, n_t, n_z, not complete)
+                    out = out_dir / video_name(well, node.fov, acq_t, z, n_t, n_z)
                     if not overwrite and _up_to_date(out, store):
                         if skipped is not None:
                             skipped.append(out)

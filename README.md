@@ -60,7 +60,7 @@ would, in the same `~/Downloads/mp4-<experiment>/` folder:
 ```python
 from record_zstack_viewer.export.convert import convert_store, default_out_dir, video_name
 
-out = default_out_dir(experiment_dir) / video_name(well, fov, t, z, n_t, n_z, partial=False)
+out = default_out_dir(experiment_dir) / video_name(well, fov, t, z, n_t, n_z)
 result = convert_store(store_dir, out)       # result.ok, result.frames, result.window, result.summary()
 ```
 
@@ -72,11 +72,10 @@ clips nothing; the window is printed per file and stored in the mp4's
 CRF 12 is near-lossless, not bit-exact; the zarr stays the ground truth.
 Odd sides are cropped by one pixel (yuv420p needs even sides). Frames wider
 than 4096 px (1x1 binning on large sensors) exceed what some players decode;
-VLC handles them. A store that never completed exports its captured frames as
-`…_partial.mp4`; a frame slot the camera never delivered repeats the previous
-frame instead of flashing black (reported as "held"). Frames stream one at a
-time through ffmpeg (from the `imageio-ffmpeg` wheel), so memory does not grow
-with video length.
+VLC handles them. A store that never completed exports the frames it captured,
+under the same name; a frame slot the recorder never wrote is a black frame,
+exactly as the zarr reads it. Frames stream one at a time through ffmpeg (from
+the `imageio-ffmpeg` wheel), so memory does not grow with video length.
 
 ## Launcher & desktop shortcut
 
