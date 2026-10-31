@@ -38,7 +38,7 @@ class ConvertResult:
     store: Path
     out: Path
     frames: int = 0                            # frames written to the mp4
-    held: int = 0                              # never-written slots filled with the previous frame
+    missing: int = 0                           # slots with no data on disk; previous frame repeated
     window: tuple[float, float] | None = None  # the 16-to-8 window used
     error: str | None = None                   # set when no file was written
 
@@ -47,14 +47,15 @@ class ConvertResult:
         return self.error is None
 
     def summary(self) -> str:
-        """One log line: `A1_fov0.mp4: 30 frames, window 4–65534`."""
+        """One log line: `A1_fov_0.mp4: 30 frames, window 4–65534`, or with holes
+        `B4_fov_0_partial.mp4: 198 frames (2 missing, previous frame repeated), window 2528–65520`."""
         if self.error == CANCELLED:
             return f"{self.out.name}: cancelled"
         if self.error is not None:
             return f"{self.out.name}: FAILED: {self.error}"
-        held = f", {self.held} held frame(s)" if self.held else ""
+        missing = f" ({self.missing} missing, previous frame repeated)" if self.missing else ""
         lo, hi = self.window
-        return f"{self.out.name}: {self.frames} frames{held}, window {lo:g}–{hi:g}"
+        return f"{self.out.name}: {self.frames} frames{missing}, window {lo:g}–{hi:g}"
 
 
 # ----------------------------------------------------------------- naming
@@ -198,7 +199,7 @@ def convert_store(store: str | Path, out: str | Path, *, fps: float | None = Non
     cancel or interrupt. `fps` defaults to real time. An odd side is cropped by
     one pixel (yuv420p needs even sides); nothing else is resampled. A frame
     slot that was never written (all fill value) repeats the previous frame
-    rather than flashing black; the count is reported as `held` (a never-written
+    rather than flashing black; the count is reported as `missing` (a missing
     slot before the first real frame stays black). `cancelled()` is checked
     before every frame: a cancelled job is discarded, `error == CANCELLED`.
     """
@@ -227,7 +228,7 @@ def convert_store(store: str | Path, out: str | Path, *, fps: float | None = Non
                 break
             plane = arr[f, 0, 0, :height, :width].read().result()
             if not plane.any() and previous is not None:
-                plane, result.held = previous, result.held + 1
+                plane, result.missing = previous, result.missing + 1
             previous = plane
             proc.stdin.write(_to_uint8(plane, lo, hi).tobytes())
             result.frames += 1

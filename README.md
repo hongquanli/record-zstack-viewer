@@ -74,7 +74,7 @@ Odd sides are cropped by one pixel (yuv420p needs even sides). Frames wider
 than 4096 px (1x1 binning on large sensors) exceed what some players decode;
 VLC handles them. A store that never completed exports its captured frames as
 `…_partial.mp4`; a frame slot the camera never delivered repeats the previous
-frame instead of flashing black (reported as "held"). Frames stream one at a
+frame instead of flashing black (the log says "2 missing, previous frame repeated"). Frames stream one at a
 time through ffmpeg (from the `imageio-ffmpeg` wheel), so memory does not grow
 with video length.
 

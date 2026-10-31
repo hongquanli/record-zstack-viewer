@@ -94,7 +94,7 @@ def test_default_out_dir_is_downloads_per_experiment(tmp_path):
 def test_export_writes_every_frame_at_full_size(model, out):
     job = mp4.plan(model, out)[0]
     result = mp4.export_job(job)
-    assert result.ok and result.frames == 6 and result.held == 0
+    assert result.ok and result.frames == 6 and result.missing == 0
     assert job.out.exists() and _tmp_files(out) == []
     assert _decode(job.out, 64, 64).shape == (6, 64, 64)
 
@@ -153,8 +153,10 @@ def test_unwritten_slot_repeats_previous_frame(model, out):
     shutil.rmtree(source.store_path(0, 0) / "c" / "3")  # frame 3 was never written
     job = mp4.plan(model, out)[0]
     result = mp4.export_job(job)
-    assert result.ok and result.held == 1 and result.frames == 6
+    assert result.ok and result.missing == 1 and result.frames == 6
     assert result.window == (float(written.min()), float(written.max()))  # empty slot ignored
+    assert result.summary() == (f"A1_fov_0.mp4: 6 frames (1 missing, previous frame repeated), "
+                                f"window {written.min()}–{written.max()}")
     frames = _decode(job.out, 64, 64)
     assert np.abs(frames[3].astype(int) - frames[2].astype(int)).mean() < 1.0
 
