@@ -30,13 +30,10 @@ class ExportJob:
     out: Path
 
 
-def plan(model: ExperimentModel, out_dir: Path, wells: list[str] | None = None,
-         overwrite: bool = False, skipped: list[Path] | None = None) -> list[ExportJob]:
+def plan(model: ExperimentModel, out_dir: Path, wells: list[str] | None = None) -> list[ExportJob]:
     """Every recording store of `wells` (default: all) as an `ExportJob`.
 
-    An mp4 already on disk and newer than its store is left out and, when a
-    `skipped` list is given, appended to it so the caller can say so
-    (`overwrite` re-plans it; it only ever replaces mp4 files, the zarr is
+    An mp4 already on disk is rewritten (only ever mp4 files; the zarr is
     read-only). A store still being written (not complete while the run has no
     `.done` marker yet) is left out; a later run picks it up.
     """
@@ -55,19 +52,8 @@ def plan(model: ExperimentModel, out_dir: Path, wells: list[str] | None = None,
                     if not source.is_complete(acq_t, z) and not run_finished:
                         continue
                     out = out_dir / video_name(well, node.fov, acq_t, z, n_t, n_z)
-                    if not overwrite and _up_to_date(out, store):
-                        if skipped is not None:
-                            skipped.append(out)
-                        continue
                     jobs.append(ExportJob(well, node.fov, acq_t, z, store, out))
     return jobs
-
-
-def _up_to_date(out: Path, store: Path) -> bool:
-    try:
-        return out.stat().st_mtime >= (store / "zarr.json").stat().st_mtime
-    except FileNotFoundError:
-        return False
 
 
 def export_job(job: ExportJob, **kwargs) -> ConvertResult:

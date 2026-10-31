@@ -1,4 +1,4 @@
-"""The "Export mp4…" dialog: plate matrix, output folder, fps, overwrite, progress.
+"""The "Export mp4…" dialog: plate matrix, output folder, fps, progress.
 
 Planning and encoding both run on a `QThread` so the window and its live
 following stay responsive; one file at a time (`export_all`). Cancel stops at
@@ -28,7 +28,7 @@ _ABSENT = QColor(235, 235, 235)
 class ExportWorker(QThread):
     """Plans and runs an export off the UI thread; `cancel()` stops at the next frame."""
 
-    planned = Signal(int, object)           # files to write, list[Path] already up to date
+    planned = Signal(int)                   # files to write
     file_progress = Signal(int, int)        # frames done, frames total (current file)
     file_done = Signal(object)              # ConvertResult
     finished_all = Signal(int, str)         # files written, error text ("" when none)
@@ -47,9 +47,8 @@ class ExportWorker(QThread):
         model, out_dir, wells, fps, window, color = self._args
         written = 0
         try:
-            skipped: list[Path] = []
-            jobs = plan(model, out_dir, wells=wells, skipped=skipped)
-            self.planned.emit(len(jobs), skipped)
+            jobs = plan(model, out_dir, wells=wells)
+            self.planned.emit(len(jobs))
             for result in export_all(jobs, fps=fps, window=window, color=color,
                                      on_progress=self.file_progress.emit,
                                      cancelled=lambda: self._cancel):
@@ -283,15 +282,11 @@ class ExportDialog(QDialog):
             self.worker.cancel()
             self.status.setText("Cancelling…")
 
-    def _on_planned(self, n_jobs: int, skipped: list) -> None:
+    def _on_planned(self, n_jobs: int) -> None:
         self.progress.setRange(0, max(n_jobs, 1))
         self.progress.setValue(0)
-        for path in skipped:
-            self.log.appendPlainText(f"{Path(path).name}: already exists, skipped (delete it to redo)")
         if n_jobs == 0:
-            self.status.setText(f"Nothing new to export: {len(skipped)} file(s) already in "
-                                f"{_short(Path(skipped[0]).parent)}." if skipped else
-                                "Nothing to export: no completed recording in the selected wells.")
+            self.status.setText("Nothing to export: no completed recording in the selected wells.")
 
     def _on_file_progress(self, done: int, total: int) -> None:
         self.status.setText(f"File {self.progress.value() + 1} / {self.progress.maximum()}: "

@@ -31,7 +31,7 @@ import numpy as np
 import tensorstore as ts
 
 CRF = 12                 # near-lossless; still plays everywhere
-PRESET = "veryfast"      # 2048x2048 bench: 3.6x faster than medium at the same CRF and PSNR, smaller file
+PRESET = "ultrafast"     # 2048x2048 bench: 7x faster than medium at the same CRF and PSNR; file ~1/3 larger
 CANCELLED = "cancelled"  # ConvertResult.error of a job stopped by the caller
 _FALLBACK_FPS = 10.0     # when the store carries no timing at all
 

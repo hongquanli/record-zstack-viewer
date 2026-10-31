@@ -69,14 +69,17 @@ def test_video_name_adds_axes_only_when_needed():
     assert mp4.video_name("A1", 0, 1, 2, 2, 3) == "A1_t1_fov_0_z2.mp4"
 
 
-def test_plan_one_job_per_store_and_skips_up_to_date(model, out):
+def test_plan_one_job_per_store_and_rewrites_existing_files(model, out):
     jobs = mp4.plan(model, out)
     assert [(j.well, j.out.name) for j in jobs] == [("A1", "A1_fov_0.mp4"), ("B2", "B2_fov_0.mp4")]
     assert mp4.plan(model, out, wells=["B2"]) == jobs[1:]
 
     assert mp4.export_job(jobs[0]).ok
-    assert [j.well for j in mp4.plan(model, out)] == ["B2"]           # A1 is up to date
-    assert len(mp4.plan(model, out, overwrite=True)) == 2
+    before = jobs[0].out.stat().st_size
+    assert mp4.plan(model, out) == jobs                                # an existing mp4 is planned again
+    assert mp4.export_job(jobs[0], window=(0.0, 1.0)).ok               # ... and rewritten in place
+    assert jobs[0].out.stat().st_size != before
+    assert sorted(p.name for p in out.iterdir()) == ["A1_fov_0.mp4"]   # no .tmp, no duplicate
 
 
 def test_plan_multi_plane_time_lapse(tiny_experiment, out):
@@ -152,7 +155,7 @@ def test_real_time_fps_reaches_ffmpeg(model, out, monkeypatch):
     assert mp4.export_job(job).ok and seen == [15.0]          # fixture: 1/15 s per frame
     assert mp4.export_job(job, fps=2.5).ok and seen[-1] == 2.5
     cmd = real(64, 64, 15.0, out / "x.mp4", (0.0, 1.0), "uint16", None)
-    assert cmd[cmd.index("-preset") + 1] == "veryfast"        # measured: 3.6x medium, same PSNR
+    assert cmd[cmd.index("-preset") + 1] == "ultrafast"       # measured: 7x medium, same PSNR
 
 
 def test_window_and_color_from_the_viewer_are_copied(model, out):
@@ -257,12 +260,11 @@ def test_cancel_discards_the_file_in_progress_and_stops(model, out):
 
 # ----------------------------------------------------------------------- CLI
 
-def test_cli_exports_all_then_reports_nothing_to_do(single_plane, out, capsys):
+def test_cli_exports_all_and_again(single_plane, out, capsys):
     assert cli_main([str(single_plane), "--out", str(out)]) == 0
     assert sorted(p.name for p in out.iterdir()) == ["A1_fov_0.mp4", "B2_fov_0.mp4"]
     assert cli_main([str(single_plane), "--out", str(out)]) == 0
-    text = capsys.readouterr().out
-    assert "A1_fov_0.mp4: already exists, skipped" in text and "nothing to export" in text
+    assert capsys.readouterr().out.count("frames, window") == 4        # both files, both runs
 
 
 def test_cli_returns_1_when_a_file_fails(single_plane, out, monkeypatch, capsys):
@@ -350,11 +352,10 @@ def test_dialog_exports_current_well_in_worker(qapp, model, out):
     assert dialog.status.text().startswith("Done: 1 file")
     assert dialog.start_button.isEnabled() and not dialog.cancel_button.isEnabled()
 
-    dialog.start()                                     # second run: nothing left to do, and it says so
+    dialog.start()                                     # second run rewrites the file
     _wait(dialog, qapp)
-    assert dialog.log.toPlainText().count("frames") == 1
-    assert "B2_fov_0.mp4: already exists, skipped" in dialog.log.toPlainText()
-    assert dialog.status.text().startswith("Done: 0 file")
+    assert dialog.log.toPlainText().count("B2_fov_0.mp4: 6 frames") == 2
+    assert dialog.status.text().startswith("Done: 1 file")
 
 
 def test_dialog_passes_the_displayed_lut_to_every_file(qapp, model, out):
