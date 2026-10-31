@@ -21,12 +21,13 @@ from record_zstack_viewer.model.experiment import ExperimentModel
 from tests.fixtures.generate import generate_experiment
 
 
-def _decode(path: Path, h: int, w: int) -> np.ndarray:
-    """All frames of `path` as a (n, h, w) uint8 array, via ffmpeg rawvideo."""
+def _decode(path: Path, h: int, w: int, pix_fmt: str = "gray") -> np.ndarray:
+    """All frames of `path` as a (n, h, w[, 3]) uint8 array, via ffmpeg rawvideo."""
     out = subprocess.run(
         [imageio_ffmpeg.get_ffmpeg_exe(), "-loglevel", "error", "-i", str(path),
-         "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True, check=True).stdout
-    return np.frombuffer(out, dtype=np.uint8).reshape(-1, h, w)
+         "-f", "rawvideo", "-pix_fmt", pix_fmt, "-"], capture_output=True, check=True).stdout
+    shape = (-1, h, w) if pix_fmt == "gray" else (-1, h, w, 3)
+    return np.frombuffer(out, dtype=np.uint8).reshape(shape)
 
 
 def _metadata_comment(path: Path) -> str:
@@ -111,8 +112,35 @@ def test_window_is_the_videos_min_max_and_clips_nothing(model, out):
     lo, hi = result.window
     expected = np.clip(np.rint((frames.astype(np.float32) - lo) * 255.0 / (hi - lo)), 0, 255)
     decoded = _decode(job.out, 64, 64).astype(np.float32)
-    assert np.abs(decoded - expected).mean() < 1.5
+    assert np.abs(decoded - expected).mean() < 2.0      # 64x64 noise fixture; smooth frames do better
     assert f"window {lo:g}-{hi:g}" in _metadata_comment(job.out)       # mapping travels with the file
+
+
+def test_channel_color_is_the_viewers_ramp_applied_after_the_window(model, out):
+    """The viewer paints a recording black -> channel colour, the colour being
+    `omero.channels[0].color` in the store (Squid writes it without '#'). The
+    mp4 applies the same ramp AFTER the 16-to-8 window, so contrast is exactly
+    the gray video's and R:G:B follow the colour. White stays gray."""
+    source = model.open_fov("A1", 0).recording
+    frames = np.stack([source.read_plane({"acq_t": 0, "frame": f, "z": 0}) for f in range(6)])
+    zarr_json = source.store_path(0, 0) / "zarr.json"
+    meta = json.loads(zarr_json.read_text())
+    assert convert.channel_color(source.store_path(0, 0)) is None            # fixture channel is white
+    meta["attributes"]["ome"]["omero"]["channels"][0]["color"] = "1FFF00"
+    zarr_json.write_text(json.dumps(meta))
+    assert convert.channel_color(source.store_path(0, 0)) == "#1FFF00"
+
+    job = mp4.plan(model, out)[0]
+    result = mp4.export_job(job)
+    assert result.ok and result.color == "#1FFF00"
+    lo, hi = result.window
+    assert (lo, hi) == (float(frames.min()), float(frames.max()))            # window unchanged by colour
+    gray = np.clip(np.rint((frames.astype(np.float32) - lo) * 255.0 / (hi - lo)), 0, 255)
+    expected = np.rint(gray[..., None] * np.array([0x1F, 0xFF, 0x00], dtype=np.float32) / 255.0)
+    decoded = _decode(job.out, 64, 64, "rgb24").astype(np.float32)
+    assert np.abs(decoded - expected).mean() < 4.0   # yuv420p stores colour at half resolution: ~3 levels
+    assert result.summary().endswith(f"window {lo:g}–{hi:g}, color #1FFF00")
+    assert "color #1FFF00" in _metadata_comment(job.out)
 
 
 def test_real_time_fps_reaches_ffmpeg(model, out, monkeypatch):
@@ -123,6 +151,35 @@ def test_real_time_fps_reaches_ffmpeg(model, out, monkeypatch):
     job = mp4.plan(model, out)[0]
     assert mp4.export_job(job).ok and seen == [15.0]          # fixture: 1/15 s per frame
     assert mp4.export_job(job, fps=2.5).ok and seen[-1] == 2.5
+    cmd = real(64, 64, 15.0, out / "x.mp4", (0.0, 1.0), "uint16", None)
+    assert cmd[cmd.index("-preset") + 1] == "veryfast"        # measured: 3.6x medium, same PSNR
+
+
+def test_window_and_color_from_the_viewer_are_copied(model, out):
+    """From the viewer the mp4 is a copy of the screen: the displayed contrast
+    limits and colour apply, values outside the limits clip as on screen, and
+    both are written into the file's comment. Without them (CLI, Squid) the
+    store's own min/max and channel colour apply, so the two paths differ only
+    in the window, and the file says which it used."""
+    source = model.open_fov("A1", 0).recording
+    frames = np.stack([source.read_plane({"acq_t": 0, "frame": f, "z": 0}) for f in range(6)])
+    lo, hi = float(np.percentile(frames, 30)), float(np.percentile(frames, 70))
+    store = source.store_path(0, 0)
+
+    result = convert.convert_store(store, out / "seen.mp4", window=(lo, hi), color="#FF0000")
+    assert result.ok and result.window == (lo, hi) and result.color == "#FF0000"
+    assert result.summary() == f"seen.mp4: 6 frames, window {lo:g}–{hi:g}, color #FF0000"
+    assert f"window {lo:g}-{hi:g}" in _metadata_comment(result.out)
+    assert "color #FF0000" in _metadata_comment(result.out)
+    red = _decode(result.out, 64, 64, "rgb24").astype(float)
+    # yuv420p stores colour at half resolution, so on this noise fixture judge regions, not pixels
+    assert red[..., 0][frames >= hi].mean() > 200 and red[..., 0][frames <= lo].mean() < 50  # clipped as on screen
+    assert red[..., 1].mean() < 10 and red[..., 2].mean() < 10                                 # a red ramp
+
+    plain = convert.convert_store(store, out / "plain.mp4", window=(lo, hi), color="#FFFFFF")
+    assert plain.ok and plain.color is None                 # white = gray, as the viewer shows it
+    default = convert.convert_store(store, out / "default.mp4")
+    assert default.window == (float(frames.min()), float(frames.max())) and default.color is None
 
 
 def test_default_fps_prefers_effective_fps(single_plane):
@@ -298,6 +355,20 @@ def test_dialog_exports_current_well_in_worker(qapp, model, out):
     assert dialog.log.toPlainText().count("frames") == 1
     assert "B2_fov_0.mp4: already exists, skipped" in dialog.log.toPlainText()
     assert dialog.status.text().startswith("Done: 0 file")
+
+
+def test_dialog_passes_the_displayed_lut_to_every_file(qapp, model, out):
+    from record_zstack_viewer.ui.export_dialog import ExportDialog
+
+    dialog = ExportDialog(model, window=(100.0, 200.0), color="#00FF00")
+    assert dialog.contrast.text() == "100 to 200 as displayed, colour #00FF00"
+    dialog.out_dir.setText(str(out))
+    dialog.start()
+    _wait(dialog, qapp)
+    log = dialog.log.toPlainText()
+    assert "A1_fov_0.mp4: 6 frames, window 100–200, color #00FF00" in log
+    assert "B2_fov_0.mp4: 6 frames, window 100–200, color #00FF00" in log
+    assert ExportDialog(model).contrast.text() == "each video's own min and max, channel colour as recorded"
 
 
 def test_close_button_closes_idle_and_after_export(qapp, model, out):

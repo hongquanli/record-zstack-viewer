@@ -264,6 +264,19 @@ class FovViewer(QWidget):
         """The embedded ndv ArrayViewer (opaque to callers that don't import ndv)."""
         return self._viewer
 
+    def current_lut(self) -> tuple[tuple[float, float] | None, str | None]:
+        """What the displayed recording is painted with, for the mp4 export to
+        copy: `((lo, hi), "#RRGGBB")`, the manual contrast limits and the top
+        colour of the channel ramp. `(None, None)` when nothing or a z-stack is
+        shown (only recordings are exported)."""
+        if self._viewer is None or self._mode != "recording":
+            return None, None
+        lut = self._viewer.display_model.default_lut
+        clims = lut.clims
+        window = (float(clims.min), float(clims.max)) if isinstance(clims, ClimsManual) else None
+        r, g, b = (int(round(float(v) * 255)) for v in lut.cmap(1.0)[:3])
+        return window, f"#{r:02X}{g:02X}{b:02X}"
+
     def set_datasets(self, datasets: FovDatasets, mode: str) -> None:
         """Show `datasets`' phase `mode` ("recording" | "zstack")."""
         if mode not in _MODES:
